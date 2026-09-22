@@ -1,0 +1,44 @@
+{
+  "$schema": "https://raw.githubusercontent.com/tauri-apps/tauri/dev/crates/tauri-config-schema/schema.json",
+  "productName": "HeyBloopie",
+  "version": "0.1.0",
+  "identifier": "com.heybloopie.desktop",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:5173",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "HeyBloopie Overlay",
+        "label": "main",
+        "width": 640,
+        "height": 420,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "center": true,
+        "resizable": false,
+        "skipTaskbar": true,
+        "visible": false
+      }
+    ],
+    "trayIcon": {
+      "iconPath": "icons/tray-grey.png",
+      "tooltip": "HeyBloopie (Not Configured)",
+      "iconAsTemplate": false
+    },
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/icon.ico"
+    ]
+  }
+}
