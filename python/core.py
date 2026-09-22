@@ -13,9 +13,84 @@ execution loop:
 Architectural Constraints:
 - Core NEVER calls AI APIs directly (delegates exclusively to Planner and Provider Abstraction Layer).
 - Core NEVER executes OS tools directly (delegates exclusively to Tool Layer via Dispatcher).
+- Manages wake word service initialization on application launch based on user preferences.
 """
 
-from typing import Any, AsyncIterator, Dict, List, Optional
+import logging
+import sqlite3
+from typing import Any, AsyncIterator, Callable, Dict, List, Optional
+
+logger = logging.getLogger("heybloopie.core")
+
+_active_wake_word_listener = None
+
+
+def is_wake_word_enabled(db_path: str = "heybloopie.db") -> bool:
+    """Checks whether the user has enabled wake word detection in preferences."""
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        cursor.execute("CREATE TABLE IF NOT EXISTS preferences (key TEXT PRIMARY KEY, value TEXT)")
+        cursor.execute("SELECT value FROM preferences WHERE key = 'wake_word_enabled'")
+        row = cursor.fetchone()
+        conn.close()
+        if row and row[0] is not None:
+            return row[0].strip().lower() in ("true", "1", "yes", "on")
+    except Exception as e:
+        logger.warning(f"Failed to check wake word preferences: {e}")
+    # Default to True for seamless voice activation if table exists
+    return True
+
+
+def on_wake_word_triggered() -> None:
+    """Callback triggered by wake word listener: displays overlay and activates speech recognition."""
+    logger.info("Wake word event received in Core: triggering overlay and speech recognition.")
+    # IPC call or notification to Tauri overlay window to show and start Web Speech API
+
+
+def start_wake_word_service(
+    on_detected: Optional[Callable[[], None]] = None,
+    db_path: str = "heybloopie.db"
+) -> bool:
+    """Initializes and starts the background wake word listener on application launch if enabled.
+
+    Args:
+        on_detected: Optional custom callback. Defaults to on_wake_word_triggered.
+        db_path: SQLite database path for checking preferences.
+
+    Returns:
+        True if started successfully, False if disabled or fell back to hotkey.
+    """
+    global _active_wake_word_listener
+
+    if not is_wake_word_enabled(db_path):
+        logger.info("Wake word listener is disabled in user preferences. Using hotkey only.")
+        return False
+
+    try:
+        from python.wake_word import WakeWordListener
+
+        callback = on_detected or on_wake_word_triggered
+        _active_wake_word_listener = WakeWordListener(
+            on_wake_detected=callback,
+            db_path=db_path
+        )
+        started = _active_wake_word_listener.start()
+        if not started:
+            logger.warning("Wake word listener could not start. Fallback to global hotkey (Ctrl+Shift+Space).")
+            return False
+        return True
+    except Exception as e:
+        logger.error(f"Failed to launch wake word listener: {e}. Fallback to hotkey.")
+        return False
+
+
+def stop_wake_word_service() -> None:
+    """Stops the active wake word background listener if running."""
+    global _active_wake_word_listener
+    if _active_wake_word_listener is not None:
+        _active_wake_word_listener.stop()
+        _active_wake_word_listener = None
 
 
 async def handle_user_request(request_text: str, context: Optional[Dict[str, Any]] = None) -> AsyncIterator[Dict[str, Any]]:

@@ -1,0 +1,4 @@
+{
+  "wake_word_model_path": "models/hey_bloopie_windows.ppn",
+  "default_wake_word": "hey bloopie"
+}
