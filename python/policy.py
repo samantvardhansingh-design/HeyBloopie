@@ -312,3 +312,25 @@ class PolicyEngine:
             logger.warning(f"Action DENIED: {tool_name} | Reason: {reason} | Params: {params}")
         except Exception as e:
             logger.error(f"Failed to log denial to database: {e}")
+
+
+_default_policy_engine: Optional[PolicyEngine] = None
+
+
+def get_policy_engine() -> PolicyEngine:
+    """Returns the singleton PolicyEngine instance."""
+    global _default_policy_engine
+    if _default_policy_engine is None:
+        _default_policy_engine = PolicyEngine()
+    return _default_policy_engine
+
+
+def check_action(tool_name: str, params: Optional[Dict[str, Any]] = None) -> PolicyResult:
+    """Evaluates a proposed action against allow-lists, risk levels, and sandbox boundaries."""
+    return get_policy_engine().check_action(tool_name, params)
+
+
+def request_permission(tool_name: str, params: Dict[str, Any]) -> bool:
+    """Prompts user for confirmation for Medium and High risk operations."""
+    return get_policy_engine().request_permission(tool_name, params)
+
