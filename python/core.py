@@ -18,11 +18,12 @@ Architectural Constraints:
 """
 
 from dataclasses import dataclass
+import json
 import logging
-import sqlite3
+import time
 from typing import Any, Callable, Dict, List, Optional
 
-from python import planner, policy, tools
+from python import memory, planner, policy, tools
 
 logger = logging.getLogger("heybloopie.core")
 
@@ -59,6 +60,39 @@ class ExecutionReport:
     steps_failed: int
 
 
+def _parse_plan_json(raw_plan: Any) -> Optional[planner.Plan]:
+    """Reconstructs a planner.Plan from a JSON string, dict, or Plan object."""
+    if not raw_plan:
+        return None
+    if isinstance(raw_plan, planner.Plan):
+        return raw_plan
+    try:
+        data = json.loads(raw_plan) if isinstance(raw_plan, str) else raw_plan
+        if not isinstance(data, dict):
+            return None
+        steps = []
+        for s in data.get("steps", []):
+            if isinstance(s, planner.PlanStep):
+                steps.append(s)
+            elif isinstance(s, dict):
+                steps.append(
+                    planner.PlanStep(
+                        tool_name=s.get("tool_name", ""),
+                        params=s.get("params", {}),
+                        risk_level=s.get("risk_level", "low"),
+                        description=s.get("description", ""),
+                    )
+                )
+        return planner.Plan(
+            steps=steps,
+            summary=data.get("summary", ""),
+            requires_confirmation=data.get("requires_confirmation", False),
+        )
+    except Exception as e:
+        logger.warning(f"Failed to reconstruct Plan: {e}")
+        return None
+
+
 def show_preview(plan: planner.Plan) -> bool:
     """Displays the plan to the user and waits for approval.
 
@@ -82,15 +116,36 @@ async def run(user_request: str) -> ExecutionReport:
     Returns:
         ExecutionReport detailing overall success, per-step results, and any exceptions.
     """
-    try:
-        # Step 1: Call planner.create_plan(user_request, AVAILABLE_TOOLS)
-        plan = await planner.create_plan(user_request, AVAILABLE_TOOLS)
+    start_time = time.time()
+    plan = None
 
-        # Step 2: If the plan has zero steps
+    try:
+        # Step 1: Check for plan reuse if user request indicates reuse
+        reuse_triggers = [
+            "same as last time",
+            "do it again",
+            "use my usual",
+            "like before",
+            "again",
+            "usual",
+        ]
+        is_reuse = any(trigger in user_request.lower() for trigger in reuse_triggers)
+
+        if is_reuse:
+            similar = memory.find_similar_task(user_request)
+            if similar and similar.get("plan_json"):
+                plan = _parse_plan_json(similar["plan_json"])
+
+        if plan is None:
+            plan = await planner.create_plan(user_request, AVAILABLE_TOOLS)
+
+        # Step 2: If the plan has zero steps (unsupported request)
         if not plan.steps:
             logger.info(f"Feature request logged: {user_request}")
             print(f"Feature request logged: {user_request}")
-            return ExecutionReport(
+            memory.log_feature_request(user_request)
+
+            report = ExecutionReport(
                 success=False,
                 summary="I can't do that yet. I'm currently focused on finding, organizing, renaming, and moving files.",
                 details=[],
@@ -99,12 +154,15 @@ async def run(user_request: str) -> ExecutionReport:
                 steps_succeeded=0,
                 steps_failed=0,
             )
+            duration_ms = int((time.time() - start_time) * 1000)
+            memory.log_task(user_request, plan, report, duration_ms)
+            return report
 
         # Step 3: If the plan requires confirmation (any MEDIUM/HIGH step)
         if plan.requires_confirmation:
             approved = show_preview(plan)
             if not approved:
-                return ExecutionReport(
+                report = ExecutionReport(
                     success=False,
                     summary="Cancelled.",
                     details=[],
@@ -113,6 +171,9 @@ async def run(user_request: str) -> ExecutionReport:
                     steps_succeeded=0,
                     steps_failed=0,
                 )
+                duration_ms = int((time.time() - start_time) * 1000)
+                memory.log_task(user_request, plan, report, duration_ms)
+                return report
 
         # Step 4: Execute the plan step by step
         details: list[dict] = []
@@ -248,8 +309,8 @@ async def run(user_request: str) -> ExecutionReport:
         else:
             summary = f"Execution failed. {steps_failed} of {total_steps} steps failed."
 
-        # Step 6: Return the ExecutionReport
-        return ExecutionReport(
+        # Step 6: Return the ExecutionReport and record in memory
+        report = ExecutionReport(
             success=success,
             summary=summary,
             details=details,
@@ -258,10 +319,16 @@ async def run(user_request: str) -> ExecutionReport:
             steps_succeeded=steps_succeeded,
             steps_failed=steps_failed,
         )
+        duration_ms = int((time.time() - start_time) * 1000)
+        try:
+            memory.log_task(user_request, plan, report, duration_ms)
+        except Exception as log_err:
+            logger.warning(f"Failed to log task execution to memory: {log_err}")
+        return report
 
     except Exception as e:
         logger.error(f"Unexpected error in Core run: {e}", exc_info=True)
-        return ExecutionReport(
+        report = ExecutionReport(
             success=False,
             summary=f"Execution error: {e}",
             details=[],
@@ -270,19 +337,25 @@ async def run(user_request: str) -> ExecutionReport:
             steps_succeeded=0,
             steps_failed=0,
         )
+        duration_ms = int((time.time() - start_time) * 1000)
+        try:
+            memory.log_task(user_request, plan if 'plan' in locals() and plan else None, report, duration_ms)
+        except Exception:
+            pass
+        return report
 
 
 def is_wake_word_enabled(db_path: str = "heybloopie.db") -> bool:
     """Checks whether the user has enabled wake word detection in preferences."""
     try:
-        conn = sqlite3.connect(db_path)
-        cursor = conn.cursor()
-        cursor.execute("CREATE TABLE IF NOT EXISTS preferences (key TEXT PRIMARY KEY, value TEXT)")
-        cursor.execute("SELECT value FROM preferences WHERE key = 'wake_word_enabled'")
-        row = cursor.fetchone()
-        conn.close()
-        if row and row[0] is not None:
-            return row[0].strip().lower() in ("true", "1", "yes", "on")
+        mem = memory.Memory(db_path=db_path)
+        val = mem.get_preference("wake_word_enabled", True)
+        if isinstance(val, bool):
+            return val
+        if isinstance(val, (int, float)):
+            return bool(val)
+        if isinstance(val, str):
+            return val.strip().lower() in ("true", "1", "yes", "on")
     except Exception as e:
         logger.warning(f"Failed to check wake word preferences: {e}")
     return True

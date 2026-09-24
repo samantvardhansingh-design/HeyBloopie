@@ -103,7 +103,8 @@ class PolicyEngine:
                 timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
                 tool_name TEXT,
                 params TEXT,
-                reason TEXT
+                reason TEXT,
+                params_json TEXT
             )
         """)
 
@@ -301,14 +302,10 @@ class PolicyEngine:
     def log_denial(self, tool_name: str, params: Dict[str, Any], reason: str) -> None:
         """Logs every denied action into the denied_actions table for security auditing."""
         try:
-            conn = self._get_connection()
-            cursor = conn.cursor()
-            cursor.execute(
-                "INSERT INTO denied_actions (tool_name, params, reason) VALUES (?, ?, ?)",
-                (tool_name, json.dumps(params), reason)
-            )
-            conn.commit()
-            conn.close()
+            from python.memory import Memory
+            mem = Memory(db_path=self.db_path)
+            mem.log_denial(tool_name, params, reason)
+            mem.close()
             logger.warning(f"Action DENIED: {tool_name} | Reason: {reason} | Params: {params}")
         except Exception as e:
             logger.error(f"Failed to log denial to database: {e}")
@@ -333,4 +330,10 @@ def check_action(tool_name: str, params: Optional[Dict[str, Any]] = None) -> Pol
 def request_permission(tool_name: str, params: Dict[str, Any]) -> bool:
     """Prompts user for confirmation for Medium and High risk operations."""
     return get_policy_engine().request_permission(tool_name, params)
+
+
+def log_denial(tool_name: str, params: Dict[str, Any], reason: str) -> None:
+    """Logs denied actions via the policy engine."""
+    return get_policy_engine().log_denial(tool_name, params, reason)
+
 
