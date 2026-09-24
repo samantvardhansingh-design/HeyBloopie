@@ -1,17 +1,12 @@
 """HeyBloopie Wake Word Detection Service.
 
-This module runs an on-device wake word listener in a dedicated background thread using
-Picovoice Porcupine (pvporcupine). When the wake word (default: "hey bloopie") is detected,
-it triggers a callback to display the HeyBloopie overlay and initiate speech recognition.
+This module provides on-device wake word detection using Picovoice Porcupine (pvporcupine).
+All audio is processed locally on the user's machine and never leaves the device.
 
-Architectural & Security Safeguards:
-- Runs in an isolated background thread without blocking the UI or core asyncio loop.
-- Any required Picovoice AccessKey is retrieved strictly from Windows Credential Manager via keyring.
-- If audio hardware, microphone, or model files are missing/unavailable, the module logs the error
-  and gracefully falls back to the global hotkey invocation mechanism without crashing.
+When the wake word (default: "hey bloopie") is detected, a callback function is invoked
+to display the overlay and initiate speech recognition.
 """
 
-import json
 import logging
 import os
 import sqlite3
@@ -23,70 +18,80 @@ import keyring
 
 logger = logging.getLogger("heybloopie.wake_word")
 
-CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.json")
-DEFAULT_MODEL_PATH = os.path.join(os.path.dirname(__file__), "models", "hey_bloopie_windows.ppn")
-DEFAULT_DB_PATH = os.path.join(os.path.dirname(__file__), "..", "heybloopie.db")
+DEFAULT_MODEL_PATH = "python/models/hey_bloopie.ppn"
+DEFAULT_DB_PATH = "heybloopie.db"
 
 
-def get_config_model_path() -> str:
-    """Reads the custom wake word model path (.ppn) from config file, with fallback."""
-    if os.path.exists(CONFIG_PATH):
-        try:
-            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                return data.get("wake_word_model_path", DEFAULT_MODEL_PATH)
-        except Exception as e:
-            logger.warning(f"Failed to read {CONFIG_PATH}: {e}. Using default model path.")
-    return DEFAULT_MODEL_PATH
-
-
-def get_preferred_wake_word(db_path: str = DEFAULT_DB_PATH) -> str:
-    """Retrieves the configured wake word phrase from the SQLite preferences table.
-
-    Defaults to 'hey bloopie' if not set or if database is not initialized.
-    """
+def get_preference(key: str, default: str, db_path: str = DEFAULT_DB_PATH) -> str:
+    """Reads a setting from the SQLite preferences table with a default fallback."""
     try:
         conn = sqlite3.connect(db_path)
         cursor = conn.cursor()
         cursor.execute(
             "CREATE TABLE IF NOT EXISTS preferences (key TEXT PRIMARY KEY, value TEXT)"
         )
-        cursor.execute(
-            "SELECT value FROM preferences WHERE key = 'wake_word'"
-        )
+        cursor.execute("SELECT value FROM preferences WHERE key = ?", (key,))
         row = cursor.fetchone()
         conn.close()
         if row and row[0]:
             return row[0]
     except Exception as e:
-        logger.warning(f"Could not load wake word from preferences ({e}). Defaulting to 'hey bloopie'.")
+        logger.warning(f"Could not load preference '{key}': {e}")
+    return default
 
-    return "hey bloopie"
+
+def get_preferred_wake_word(db_path: str = DEFAULT_DB_PATH) -> str:
+    """Retrieves the configured wake word phrase from preferences (default: 'hey bloopie')."""
+    return get_preference("wake_word", "hey bloopie", db_path)
 
 
-class WakeWordListener:
-    """Background listener for on-device wake word detection using pvporcupine."""
+def get_keyword_path(db_path: str = DEFAULT_DB_PATH) -> str:
+    """Retrieves the wake word model file path from preferences (default: 'python/models/hey_bloopie.ppn')."""
+    return get_preference("wake_word_path", DEFAULT_MODEL_PATH, db_path)
+
+
+def get_access_key() -> Optional[str]:
+    """Retrieves the Porcupine access key from Windows Credential Manager."""
+    try:
+        return keyring.get_password("heybloopie", "porcupine")
+    except Exception as e:
+        logger.warning(f"Could not retrieve Porcupine access key from keyring: {e}")
+        return None
+
+
+class WakeWordDetector:
+    """On-device wake word detector running Picovoice Porcupine in a background thread."""
 
     def __init__(
         self,
-        on_wake_detected: Callable[[], None],
-        model_path: Optional[str] = None,
-        db_path: str = DEFAULT_DB_PATH,
         access_key: Optional[str] = None,
+        keyword_path: Optional[str] = None,
+        callback: Optional[Callable[[], None]] = None,
+        fallback_callback: Optional[Callable[[], None]] = None,
+        db_path: str = DEFAULT_DB_PATH,
+        on_wake_detected: Optional[Callable[[], None]] = None,
     ):
-        """Initializes the wake word listener.
+        """Initializes the WakeWordDetector.
 
         Args:
-            on_wake_detected: Callback function invoked when the wake word is heard.
-            model_path: Optional custom .ppn file path.
-            db_path: Path to the SQLite database containing user preferences.
-            access_key: Optional Picovoice access key. If None, retrieved from Windows Credential Manager.
+            access_key: Porcupine access key. If None, loaded from Windows Credential Manager.
+            keyword_path: Path to custom .ppn keyword model. If None, loaded from preferences.
+            callback: Function called when wake word is detected.
+            fallback_callback: Optional function called when microphone/audio fails.
+            db_path: SQLite preferences database path.
+            on_wake_detected: Backward-compatible alias for callback.
         """
-        self.on_wake_detected = on_wake_detected
-        self.model_path = model_path or get_config_model_path()
         self.db_path = db_path
-        self.access_key = access_key or keyring.get_password("HeyBloopie_Vault", "picovoice_access_key") or "PLACEHOLDER_KEY"
-        self.wake_phrase = get_preferred_wake_word(self.db_path)
+        self.callback = callback or on_wake_detected
+        self.fallback_callback = fallback_callback
+
+        self.wake_word = get_preferred_wake_word(self.db_path)
+        self.keyword_path = keyword_path or get_keyword_path(self.db_path)
+
+        # Retrieve access key from Windows Credential Manager if not passed explicitly
+        if not access_key:
+            access_key = get_access_key()
+        self.access_key = access_key or ""
 
         self._running = False
         self._thread: Optional[threading.Thread] = None
@@ -94,78 +99,94 @@ class WakeWordListener:
         self._recorder = None
 
     def start(self) -> bool:
-        """Starts the wake word background listening thread.
+        """Starts the background listening thread.
 
         Returns:
-            True if listener started successfully, False if microphone/porcupine failed (triggering fallback).
+            True if started successfully, False if microphone/Porcupine failed.
         """
-        if self._running:
+        if self.is_running():
             return True
+
+        # Check keyword file existence
+        if not self.keyword_path or not os.path.exists(self.keyword_path):
+            logger.error(
+                "Wake word model not found. Please download it from the Picovoice console or use the hotkey."
+            )
 
         try:
             import pvporcupine
         except ImportError:
-            logger.error("pvporcupine library is not installed. Falling back to hotkey invocation.")
+            logger.error("pvporcupine library is not installed. Falling back to hotkey.")
+            if self.fallback_callback:
+                self.fallback_callback()
             return False
 
+        # Initialize Porcupine instance
         try:
-            # Initialize Porcupine with custom model path or keyword
-            if self.model_path and os.path.exists(self.model_path):
+            if self.keyword_path and os.path.exists(self.keyword_path):
                 self._porcupine = pvporcupine.create(
                     access_key=self.access_key,
-                    keyword_paths=[self.model_path]
+                    keyword_paths=[self.keyword_path],
                 )
             else:
-                # Placeholder fallback if custom .ppn is not yet present on disk
-                logger.info(f"Model path {self.model_path} not found. Attempting built-in keyword or mock initialization.")
+                # Built-in keyword fallback for testing/placeholder
                 self._porcupine = pvporcupine.create(
                     access_key=self.access_key,
-                    keywords=["porcupine"]
+                    keywords=["porcupine"],
                 )
-
-            self._running = True
-            self._thread = threading.Thread(target=self._listen_loop, daemon=True, name="WakeWordListenerThread")
-            self._thread.start()
-            logger.info(f"Wake word listener started successfully (Phrase: '{self.wake_phrase}').")
-            return True
-
         except Exception as err:
-            logger.error(f"Microphone or Porcupine initialization failed: {err}. Falling back to hotkey invocation.")
-            self._running = False
+            logger.error(f"Porcupine initialization failed: {err}. Falling back to hotkey.")
+            if self.fallback_callback:
+                self.fallback_callback()
             return False
 
-    def _listen_loop(self) -> None:
-        """Internal audio stream loop processing frames."""
+        # Open default microphone using pvrecorder
         try:
-            # Attempt to use PvRecorder if available for low-latency audio capture
-            try:
-                import pvrecorder
-                self._recorder = pvrecorder.PvRecorder(frame_length=self._porcupine.frame_length)
-                self._recorder.start()
-            except Exception as rec_err:
-                logger.warning(f"PvRecorder unavailable ({rec_err}). Audio stream mock or fallback.")
+            import pvrecorder
+            self._recorder = pvrecorder.PvRecorder(frame_length=self._porcupine.frame_length)
+            self._recorder.start()
+        except Exception as err:
+            logger.error(
+                f"Microphone is unavailable: {err}. Falling back to hotkey (Ctrl+Shift+Space)."
+            )
+            self._cleanup()
+            if self.fallback_callback:
+                self.fallback_callback()
+            return False
 
+        self._running = True
+        self._thread = threading.Thread(
+            target=self._listen_loop,
+            daemon=True,
+            name="WakeWordDetectorThread",
+        )
+        self._thread.start()
+        logger.info(f"Wake word detector started successfully (Phrase: '{self.wake_word}').")
+        return True
+
+    def _listen_loop(self) -> None:
+        """Continuously reads audio frames and feeds them to Porcupine."""
+        try:
             while self._running:
                 if self._recorder is not None:
                     pcm = self._recorder.read()
-                    keyword_index = self._porcupine.process(pcm)
+                    if self._porcupine is not None:
+                        result = self._porcupine.process(pcm)
+                        if result >= 0:
+                            logger.info("Wake word detected! Triggering callback.")
+                            if self.callback:
+                                self.callback()
                 else:
-                    # Idle sleep if recorder is not active
-                    time.sleep(0.05)
-                    keyword_index = -1
-
-                if keyword_index >= 0:
-                    logger.info("Wake word detected! Triggering overlay & speech recognition.")
-                    if self.on_wake_detected:
-                        self.on_wake_detected()
-
-        except Exception as loop_err:
-            logger.error(f"Error in wake word audio loop: {loop_err}. Falling back to hotkey.")
+                    time.sleep(0.02)
+        except Exception as err:
+            logger.error(f"Error in wake word audio loop: {err}. Falling back to hotkey.")
+            if self.fallback_callback:
+                self.fallback_callback()
         finally:
             self._cleanup()
 
     def _cleanup(self) -> None:
-        """Releases Porcupine and audio resources cleanly."""
+        """Releases microphone and Porcupine resources cleanly."""
         if self._recorder is not None:
             try:
                 self._recorder.stop()
@@ -182,13 +203,21 @@ class WakeWordListener:
             self._porcupine = None
 
     def stop(self) -> None:
-        """Stops the listening thread and releases audio devices."""
+        """Stops the listening thread and releases all audio resources."""
         self._running = False
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=1.0)
         self._cleanup()
-        logger.info("Wake word listener stopped.")
+        logger.info("Wake word detector stopped.")
+
+    def is_running(self) -> bool:
+        """Returns True if the background listening thread is active."""
+        return self._running and (self._thread is not None and self._thread.is_alive())
 
     def is_listening(self) -> bool:
-        """Returns whether the background listener is currently running."""
-        return self._running and (self._thread is not None and self._thread.is_alive())
+        """Alias for is_running()."""
+        return self.is_running()
+
+
+# Backward-compatible alias
+WakeWordListener = WakeWordDetector
