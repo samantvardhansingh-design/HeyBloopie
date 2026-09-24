@@ -201,6 +201,23 @@ class Memory:
                     CREATE INDEX IF NOT EXISTS idx_tasks_timestamp ON tasks(timestamp DESC);
                 """)
 
+                # 5. models table
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS models (
+                        id TEXT PRIMARY KEY,
+                        name TEXT NOT NULL,
+                        provider TEXT NOT NULL,
+                        is_free INTEGER NOT NULL DEFAULT 0,
+                        context_length INTEGER DEFAULT 0,
+                        input_price REAL DEFAULT 0.0,
+                        output_price REAL DEFAULT 0.0,
+                        last_updated TEXT NOT NULL
+                    );
+                """)
+                cursor.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_models_provider ON models(provider);
+                """)
+
         self._execute_with_retry(run_migration)
 
     # ═══════════════════════════════════════════════════════════════════
@@ -625,6 +642,150 @@ class Memory:
 
         self._execute_with_retry(execute_export)
 
+    # ═══════════════════════════════════════════════════════════════════
+    # PART 6: Models Registry Persistence
+    # ═══════════════════════════════════════════════════════════════════
+
+    def save_models(self, models: List[Dict[str, Any]]) -> bool:
+        """Upserts a list of model records into the models table within a transaction.
+
+        Args:
+            models: List of model dictionaries matching the models table schema.
+
+        Returns:
+            True if successful, False otherwise.
+        """
+        if not self.conn or not models:
+            return False
+
+        def op():
+            with self.conn:
+                cursor = self.conn.cursor()
+                cursor.executemany(
+                    """
+                    INSERT INTO models (id, name, provider, is_free, context_length, input_price, output_price, last_updated)
+                    VALUES (:id, :name, :provider, :is_free, :context_length, :input_price, :output_price, :last_updated)
+                    ON CONFLICT(id) DO UPDATE SET
+                        name=excluded.name,
+                        provider=excluded.provider,
+                        is_free=excluded.is_free,
+                        context_length=excluded.context_length,
+                        input_price=excluded.input_price,
+                        output_price=excluded.output_price,
+                        last_updated=excluded.last_updated;
+                    """,
+                    models,
+                )
+                return True
+
+        res = self._execute_with_retry(op)
+        return bool(res)
+
+    def get_models(self, provider: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Retrieves models, optionally filtered by provider.
+
+        Args:
+            provider: Provider name to filter by (e.g. 'gemini', 'openrouter'), or None for all.
+
+        Returns:
+            List of model dictionaries ordered by is_free DESC, name ASC.
+        """
+        if not self.conn:
+            return []
+
+        def op():
+            cursor = self.conn.cursor()
+            if provider:
+                cursor.execute(
+                    """
+                    SELECT id, name, provider, is_free, context_length, input_price, output_price, last_updated
+                    FROM models
+                    WHERE LOWER(provider) = LOWER(?)
+                    ORDER BY is_free DESC, name ASC;
+                    """,
+                    (provider,),
+                )
+            else:
+                cursor.execute(
+                    """
+                    SELECT id, name, provider, is_free, context_length, input_price, output_price, last_updated
+                    FROM models
+                    ORDER BY provider ASC, is_free DESC, name ASC;
+                    """
+                )
+            rows = cursor.fetchall()
+            return [
+                {
+                    "id": row["id"],
+                    "name": row["name"],
+                    "provider": row["provider"],
+                    "is_free": row["is_free"],
+                    "context_length": row["context_length"],
+                    "input_price": row["input_price"],
+                    "output_price": row["output_price"],
+                    "last_updated": row["last_updated"],
+                }
+                for row in rows
+            ]
+
+        res = self._execute_with_retry(op)
+        return res if res is not None else []
+
+    def get_model(self, model_id: str) -> Optional[Dict[str, Any]]:
+        """Retrieves a single model by ID.
+
+        Args:
+            model_id: Unique model identifier.
+
+        Returns:
+            Model dictionary if found, None otherwise.
+        """
+        if not self.conn:
+            return None
+
+        def op():
+            cursor = self.conn.cursor()
+            cursor.execute(
+                """
+                SELECT id, name, provider, is_free, context_length, input_price, output_price, last_updated
+                FROM models
+                WHERE id = ?
+                LIMIT 1;
+                """,
+                (model_id,),
+            )
+            row = cursor.fetchone()
+            if not row:
+                return None
+            return {
+                "id": row["id"],
+                "name": row["name"],
+                "provider": row["provider"],
+                "is_free": row["is_free"],
+                "context_length": row["context_length"],
+                "input_price": row["input_price"],
+                "output_price": row["output_price"],
+                "last_updated": row["last_updated"],
+            }
+
+        return self._execute_with_retry(op)
+
+    def get_models_last_updated(self, provider: str) -> Optional[str]:
+        """Gets the most recent last_updated timestamp for a provider's models."""
+        if not self.conn:
+            return None
+
+        def op():
+            cursor = self.conn.cursor()
+            cursor.execute(
+                "SELECT MAX(last_updated) as latest FROM models WHERE LOWER(provider) = LOWER(?);",
+                (provider,),
+            )
+            row = cursor.fetchone()
+            return row["latest"] if row and row["latest"] else None
+
+        return self._execute_with_retry(op)
+
     def close(self) -> None:
         """Closes the connection cleanly."""
         if self.conn:
@@ -693,5 +854,21 @@ def get_denials(*args, **kwargs):
 
 def export_log(*args, **kwargs):
     return get_memory().export_log(*args, **kwargs)
+
+
+def save_models(*args, **kwargs):
+    return get_memory().save_models(*args, **kwargs)
+
+
+def get_models(*args, **kwargs):
+    return get_memory().get_models(*args, **kwargs)
+
+
+def get_model(*args, **kwargs):
+    return get_memory().get_model(*args, **kwargs)
+
+
+def get_models_last_updated(*args, **kwargs):
+    return get_memory().get_models_last_updated(*args, **kwargs)
 
 

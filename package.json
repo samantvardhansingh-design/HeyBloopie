@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "description": "Desktop AI agent for Windows that helps users manage files through natural language",
   "private": true,
+  "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",

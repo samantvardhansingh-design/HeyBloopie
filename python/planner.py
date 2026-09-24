@@ -12,6 +12,7 @@ Architectural Constraints:
 """
 
 from dataclasses import dataclass
+import inspect
 import json
 import logging
 import re
@@ -116,35 +117,64 @@ def _parse_json_response(raw_text: str) -> Optional[dict]:
     return None
 
 
-async def create_plan(user_request: str, available_tools: Optional[list] = None) -> Plan:
+async def create_plan(
+    user_request: str,
+    available_tools: Optional[list] = None,
+    model: Optional[str] = None,
+) -> Plan:
     """Receives a user request and returns a structured plan without executing anything.
 
     Args:
         user_request: The user's natural language request.
         available_tools: List of available tool descriptions and parameters.
+        model: Optional model ID to route the planning prompt to.
 
     Returns:
         A Plan containing PlanSteps, a summary, and whether confirmation is required.
     """
     tools_list = available_tools if available_tools is not None else []
     prompt = _build_prompt(user_request, tools_list)
+    options = {"model": model} if model else None
 
     parsed: Optional[dict] = None
 
+    def _is_fallback_error(e: Exception) -> bool:
+        err_str = str(e).lower()
+        type_name = type(e).__name__.lower()
+        return any(
+            kw in err_str or kw in type_name
+            for kw in [
+                "rate", "limit", "429", "quota", "exhausted",
+                "unavailable", "503", "connection", "connect", "timeout", "offline", "overloaded"
+            ]
+        )
+
+    async def _call_generate_plan(prompt_str: str) -> str:
+        sig = inspect.signature(provider.generate_plan)
+        if "options" in sig.parameters or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
+            return await provider.generate_plan(prompt_str, options=options)
+        elif options and len(sig.parameters) >= 2:
+            return await provider.generate_plan(prompt_str, options)
+        return await provider.generate_plan(prompt_str)
+
     # Step 1 & 2: Call provider.generate_plan
     try:
-        raw_response = await provider.generate_plan(prompt)
+        raw_response = await _call_generate_plan(prompt)
         parsed = _parse_json_response(raw_response)
     except Exception as e:
+        if _is_fallback_error(e):
+            raise
         logger.warning(f"Initial plan generation or parsing failed: {e}")
         parsed = None
 
     # Step 3: If parsing fails, retry once
     if parsed is None:
         try:
-            raw_response = await provider.generate_plan(prompt)
+            raw_response = await _call_generate_plan(prompt)
             parsed = _parse_json_response(raw_response)
         except Exception as e:
+            if _is_fallback_error(e):
+                raise
             logger.warning(f"Retry plan generation or parsing failed: {e}")
             parsed = None
 

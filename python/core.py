@@ -18,12 +18,13 @@ Architectural Constraints:
 """
 
 from dataclasses import dataclass
+import inspect
 import json
 import logging
 import time
 from typing import Any, Callable, Dict, List, Optional
 
-from python import memory, planner, policy, tools
+from python import memory, model_router, planner, policy, tools
 
 logger = logging.getLogger("heybloopie.core")
 
@@ -136,8 +137,63 @@ async def run(user_request: str) -> ExecutionReport:
             if similar and similar.get("plan_json"):
                 plan = _parse_plan_json(similar["plan_json"])
 
+        selected_model: Optional[str] = None
+        selected_provider: Optional[str] = None
+
         if plan is None:
-            plan = await planner.create_plan(user_request, AVAILABLE_TOOLS)
+            router = model_router.ModelRouter(memory=memory.get_memory())
+            fallback_models: List[Optional[str]] = []
+            try:
+                fallback_models = await router.select_with_fallback(user_request)
+            except Exception as e:
+                logger.warning(f"ModelRouter fallback lookup failed: {e}")
+
+            if not fallback_models:
+                try:
+                    chosen = await router.select_model(user_request)
+                    fallback_models = [chosen]
+                except Exception:
+                    fallback_models = [None]
+
+            last_fallback_error = None
+            for m_id in fallback_models:
+                selected_model = m_id
+                try:
+                    sig = inspect.signature(planner.create_plan)
+                    if "model" in sig.parameters or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
+                        plan = await planner.create_plan(user_request, AVAILABLE_TOOLS, model=m_id)
+                    else:
+                        plan = await planner.create_plan(user_request, AVAILABLE_TOOLS)
+
+                    if selected_model:
+                        info = router.registry.get_model_info(selected_model)
+                        if info:
+                            selected_provider = info.get("provider")
+
+                    last_fallback_error = None
+                    break
+                except Exception as e:
+                    if model_router.should_fallback(e):
+                        logger.warning(
+                            f"Model '{m_id}' failed with rate limit or availability error: {e}. Trying fallback..."
+                        )
+                        last_fallback_error = e
+                        continue
+                    raise
+
+            if plan is None and last_fallback_error:
+                report = ExecutionReport(
+                    success=False,
+                    summary=f"All models failed due to rate limits or availability: {last_fallback_error}",
+                    details=[],
+                    exceptions=[{"error": str(last_fallback_error)}],
+                    total_steps=0,
+                    steps_succeeded=0,
+                    steps_failed=0,
+                )
+                duration_ms = int((time.time() - start_time) * 1000)
+                memory.log_task(user_request, None, report, duration_ms, provider=selected_provider, model=selected_model)
+                return report
 
         # Step 2: If the plan has zero steps (unsupported request)
         if not plan.steps:
@@ -321,7 +377,14 @@ async def run(user_request: str) -> ExecutionReport:
         )
         duration_ms = int((time.time() - start_time) * 1000)
         try:
-            memory.log_task(user_request, plan, report, duration_ms)
+            memory.log_task(
+                user_request,
+                plan,
+                report,
+                duration_ms,
+                provider=selected_provider if 'selected_provider' in locals() else None,
+                model=selected_model if 'selected_model' in locals() else None,
+            )
         except Exception as log_err:
             logger.warning(f"Failed to log task execution to memory: {log_err}")
         return report
