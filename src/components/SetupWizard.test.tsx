@@ -1,6 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
-import React from "react";
 import { SetupWizard } from "./SetupWizard";
 
 // Mock Tauri invoke from @tauri-apps/api/core
@@ -22,7 +21,7 @@ vi.mock("../hooks/useSpeechSynthesis", () => ({
   }),
 }));
 
-describe("SetupWizard Component (Part 2)", () => {
+describe("SetupWizard Component (Part 4)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
@@ -31,8 +30,28 @@ describe("SetupWizard Component (Part 2)", () => {
     vi.clearAllMocks();
   });
 
-  it("Screen 1: Renders 5 provider cards with Gemini pre-selected", () => {
+  it("Screen 0: Renders Welcome screen and transitions to Screen 1 on next", () => {
     render(<SetupWizard />);
+
+    expect(screen.getByTestId("screen-welcome")).toBeDefined();
+    expect(screen.getByText("Welcome to HeyBloopie")).toBeDefined();
+    expect(
+      screen.getByText(/HeyBloopie is your background executive/i)
+    ).toBeDefined();
+
+    const nextBtn = screen.getByTestId("btn-welcome-next");
+    fireEvent.click(nextBtn);
+
+    expect(screen.getByTestId("screen-1")).toBeDefined();
+
+    // Verify back button on Screen 1 returns to Screen 0
+    const backBtn = screen.getByTestId("btn-back-to-welcome");
+    fireEvent.click(backBtn);
+    expect(screen.getByTestId("screen-welcome")).toBeDefined();
+  });
+
+  it("Screen 1: Renders 5 provider cards with Gemini pre-selected", () => {
+    render(<SetupWizard initialScreen={1} />);
 
     expect(screen.getByTestId("screen-1")).toBeDefined();
 
@@ -54,7 +73,7 @@ describe("SetupWizard Component (Part 2)", () => {
   });
 
   it("Screen 1: Allows selecting a different provider and transitions on Continue", () => {
-    render(<SetupWizard />);
+    render(<SetupWizard initialScreen={1} />);
 
     // Select OpenAI
     const openAICard = screen.getByTestId("provider-card-openai");
@@ -71,7 +90,7 @@ describe("SetupWizard Component (Part 2)", () => {
   });
 
   it("Screen 2: Allows navigation back to Screen 1", () => {
-    render(<SetupWizard />);
+    render(<SetupWizard initialScreen={1} />);
 
     fireEvent.click(screen.getByTestId("btn-continue"));
     expect(screen.getByTestId("screen-2")).toBeDefined();
@@ -83,11 +102,11 @@ describe("SetupWizard Component (Part 2)", () => {
     expect(screen.getByTestId("screen-1")).toBeDefined();
   });
 
-  it("Screen 2: Validates API key successfully via Tauri invoke and speaks confirmation", async () => {
+  it("Screen 2 -> Screen 3: Validates API key, transitions to Screen 3, speaks prompt and calls onComplete", async () => {
     mockInvoke.mockResolvedValueOnce({ success: true, provider: "gemini" });
     const onComplete = vi.fn();
 
-    render(<SetupWizard onComplete={onComplete} />);
+    render(<SetupWizard initialScreen={1} onComplete={onComplete} />);
 
     // Continue with Gemini
     fireEvent.click(screen.getByTestId("btn-continue"));
@@ -105,10 +124,19 @@ describe("SetupWizard Component (Part 2)", () => {
       });
     });
 
+    // Screen 3 is shown
     await waitFor(() => {
-      expect(screen.getByTestId("success-message")).toBeDefined();
-      expect(mockSpeak).toHaveBeenCalledWith("Brain connected. I'm ready.");
+      expect(screen.getByTestId("screen-ready")).toBeDefined();
+      expect(screen.getByText(/HeyBloopie is ready. Press/i)).toBeDefined();
+      expect(mockSpeak).toHaveBeenCalledWith(
+        "HeyBloopie is ready. Press Ctrl+Shift+Space or say 'Hey Bloopie' to start."
+      );
     });
+
+    // Click Finish / Start button
+    const finishBtn = screen.getByTestId("btn-finish-ready");
+    fireEvent.click(finishBtn);
+    expect(onComplete).toHaveBeenCalledWith("gemini");
   });
 
   it("Screen 2: Displays exact human-readable error message on validation failure", async () => {
@@ -117,7 +145,7 @@ describe("SetupWizard Component (Part 2)", () => {
       error: "Gemini didn't recognize this key. It may have been deleted or copied incorrectly.",
     });
 
-    render(<SetupWizard />);
+    render(<SetupWizard initialScreen={1} />);
 
     fireEvent.click(screen.getByTestId("btn-continue"));
 
@@ -137,14 +165,15 @@ describe("SetupWizard Component (Part 2)", () => {
     expect(mockSpeak).not.toHaveBeenCalled();
   });
 
-  it("Screen 2: Ollama flow auto-detects local server and lists installed models", async () => {
+  it("Screen 2: Ollama flow auto-detects local server and completes to Screen 3", async () => {
     mockInvoke.mockResolvedValueOnce({
       success: true,
       detected: true,
       models: ["llama3.2:latest", "mistral:latest"],
     });
+    const onComplete = vi.fn();
 
-    render(<SetupWizard initialProvider="ollama" />);
+    render(<SetupWizard initialProvider="ollama" initialScreen={1} onComplete={onComplete} />);
 
     // Transition to Screen 2
     fireEvent.click(screen.getByTestId("btn-continue"));
@@ -160,9 +189,17 @@ describe("SetupWizard Component (Part 2)", () => {
       expect(screen.getByTestId("btn-ollama-finish")).toBeDefined();
     });
 
-    // Clicking Connect & Save finishes and speaks
+    // Clicking Connect & Save transitions to Screen 3 and speaks
     fireEvent.click(screen.getByTestId("btn-ollama-finish"));
-    expect(mockSpeak).toHaveBeenCalledWith("Brain connected. I'm ready.");
+    await waitFor(() => {
+      expect(screen.getByTestId("screen-ready")).toBeDefined();
+      expect(mockSpeak).toHaveBeenCalledWith(
+        "HeyBloopie is ready. Press Ctrl+Shift+Space or say 'Hey Bloopie' to start."
+      );
+    });
+
+    fireEvent.click(screen.getByTestId("btn-finish-ready"));
+    expect(onComplete).toHaveBeenCalledWith("ollama");
   });
 
   it("Screen 2: Ollama flow shows retry button when server is not running", async () => {
@@ -172,7 +209,7 @@ describe("SetupWizard Component (Part 2)", () => {
       models: [],
     });
 
-    render(<SetupWizard initialProvider="ollama" />);
+    render(<SetupWizard initialProvider="ollama" initialScreen={1} />);
 
     fireEvent.click(screen.getByTestId("btn-continue"));
 

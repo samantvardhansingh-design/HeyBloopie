@@ -25,6 +25,7 @@ export interface ExecutionReport {
 
 interface OverlayProps {
   onClose?: () => void;
+  onOpenSettings?: () => void;
   onRun?: (request: string) => Promise<ExecutionReport>;
 }
 
@@ -41,7 +42,7 @@ interface OverlayProps {
  *    - Escape key or "Stop" button halts all speech and hides the overlay.
  * 6. Mute toggle button & Close button.
  */
-export const Overlay: React.FC<OverlayProps> = ({ onClose, onRun }) => {
+export const Overlay: React.FC<OverlayProps> = ({ onClose, onOpenSettings, onRun }) => {
   const [isVisible, setIsVisible] = useState<boolean>(true);
   const [inputText, setInputText] = useState<string>("");
   const [isWorking, setIsWorking] = useState<boolean>(false);
@@ -275,6 +276,18 @@ export const Overlay: React.FC<OverlayProps> = ({ onClose, onRun }) => {
           >
             {isMuted ? "🔇" : "🔊"}
           </button>
+
+          {/* Settings Button */}
+          {onOpenSettings && (
+            <button
+              className="hud-btn-icon"
+              data-testid="settings-btn"
+              onClick={onOpenSettings}
+              title="Open Settings"
+            >
+              ⚙️
+            </button>
+          )}
 
           {/* Close Button */}
           <button

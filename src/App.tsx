@@ -1,13 +1,144 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import Overlay from "./components/Overlay";
 import SetupWizard from "./components/SetupWizard";
+import SettingsWindow from "./components/SettingsWindow";
+import { useUpdater } from "./hooks/useUpdater";
 
-export const App: React.FC = () => {
-  const [isConfigured] = useState<boolean>(true);
+export interface AppProps {
+  initialView?: "overlay" | "setup" | "settings";
+  invokeFn?: (cmd: string, args?: any) => Promise<any>;
+}
+
+export const App: React.FC<AppProps> = ({ initialView, invokeFn }) => {
+  const [view, setView] = useState<"overlay" | "setup" | "settings">(initialView || "overlay");
+  const { checkForUpdates, isUpdating, progress, statusMessage } = useUpdater();
+
+  const callTauri = async (cmd: string, args?: any): Promise<any> => {
+    if (invokeFn) {
+      return invokeFn(cmd, args);
+    }
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      return await invoke(cmd, args);
+    } catch (err) {
+      console.warn(`Tauri invoke('${cmd}') fallback:`, err);
+      return null;
+    }
+  };
+
+  useEffect(() => {
+    // Check for updates
+    checkForUpdates();
+
+    // Check onboarding on mount unless an initialView was explicitly forced
+    const initApp = async () => {
+      try {
+        const onboardingNeeded = await callTauri("check_onboarding_needed");
+        if (onboardingNeeded === true) {
+          setView("setup");
+          await callTauri("set_tray_ready", { ready: false });
+        } else if (onboardingNeeded === false) {
+          if (!initialView) {
+            setView("overlay");
+          }
+          await callTauri("set_tray_ready", { ready: true });
+          await callTauri("start_wake_word");
+        }
+      } catch (err) {
+        console.warn("Failed checking onboarding status:", err);
+      }
+    };
+
+    initApp();
+
+    // Listen to tray and backend events
+    let unlisteners: Array<() => void> = [];
+    const setupListeners = async () => {
+      try {
+        const { listen } = await import("@tauri-apps/api/event");
+        const u1 = await listen("open_overlay", () => setView("overlay"));
+        const u2 = await listen("open_settings", () => setView("settings"));
+        const u3 = await listen("check_updates", () => checkForUpdates());
+        unlisteners.push(u1, u2, u3);
+      } catch (err) {
+        // Ignored outside Tauri
+      }
+    };
+    setupListeners();
+
+    return () => {
+      unlisteners.forEach((u) => u());
+    };
+  }, []);
+
+  const handleSetupComplete = async (_provider: string) => {
+    await callTauri("set_tray_ready", { ready: true });
+    await callTauri("start_wake_word");
+    setView("overlay");
+  };
 
   return (
     <main style={{ width: "100%", height: "100%" }}>
-      {isConfigured ? <Overlay /> : <SetupWizard />}
+      {isUpdating && (
+        <div
+          data-testid="updater-progress"
+          style={{
+            position: "fixed",
+            bottom: "16px",
+            right: "16px",
+            background: "#1e1e24",
+            color: "#ffffff",
+            padding: "10px 16px",
+            borderRadius: "8px",
+            boxShadow: "0 4px 12px rgba(0,0,0,0.4)",
+            zIndex: 9999,
+            fontSize: "12px",
+          }}
+        >
+          <div>{statusMessage}</div>
+          {progress > 0 && (
+            <div
+              style={{
+                width: "100%",
+                height: "4px",
+                background: "#333",
+                borderRadius: "2px",
+                marginTop: "6px",
+                overflow: "hidden",
+              }}
+            >
+              <div
+                style={{
+                  width: `${progress}%`,
+                  height: "100%",
+                  background: "#4f46e5",
+                  transition: "width 0.2s ease",
+                }}
+              />
+            </div>
+          )}
+        </div>
+      )}
+
+      {view === "setup" && (
+        <SetupWizard
+          onComplete={handleSetupComplete}
+          onCancel={() => setView("overlay")}
+          invokeFn={invokeFn}
+        />
+      )}
+
+      {view === "settings" && (
+        <SettingsWindow
+          onClose={() => setView("overlay")}
+          onChangeProvider={() => setView("setup")}
+          invokeFn={invokeFn}
+        />
+      )}
+
+      {view === "overlay" && (
+        <Overlay onOpenSettings={() => setView("settings")} />
+      )}
     </main>
   );
 };

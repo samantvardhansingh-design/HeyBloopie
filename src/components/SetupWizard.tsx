@@ -85,6 +85,7 @@ export const PROVIDERS: ProviderOption[] = [
 
 export interface SetupWizardProps {
   initialProvider?: string;
+  initialScreen?: 0 | 1 | 2 | 3;
   onComplete?: (provider: string) => void;
   onCancel?: () => void;
   invokeFn?: (cmd: string, args?: any) => Promise<any>;
@@ -92,12 +93,13 @@ export interface SetupWizardProps {
 
 export const SetupWizard: React.FC<SetupWizardProps> = ({
   initialProvider = "gemini",
+  initialScreen = 0,
   onComplete,
   onCancel,
   invokeFn,
 }) => {
-  // Screen state: 1 (Choose Provider) or 2 (Set Up Provider)
-  const [currentScreen, setCurrentScreen] = useState<1 | 2>(1);
+  // Screen state: 0 (Welcome), 1 (Choose Provider), 2 (Set Up Provider), 3 (Ready)
+  const [currentScreen, setCurrentScreen] = useState<0 | 1 | 2 | 3>(initialScreen);
   const [selectedProviderId, setSelectedProviderId] = useState<string>(initialProvider);
   const [apiKey, setApiKey] = useState<string>("");
   const [showKey, setShowKey] = useState<boolean>(false);
@@ -130,6 +132,13 @@ export const SetupWizard: React.FC<SetupWizardProps> = ({
       throw err;
     }
   };
+
+  // Speak ready message when entering Screen 3
+  useEffect(() => {
+    if (currentScreen === 3) {
+      speak("HeyBloopie is ready. Press Ctrl+Shift+Space or say 'Hey Bloopie' to start.");
+    }
+  }, [currentScreen]);
 
   // Run Ollama detection when Screen 2 opens for Ollama
   useEffect(() => {
@@ -172,7 +181,11 @@ export const SetupWizard: React.FC<SetupWizardProps> = ({
   const handleBack = () => {
     setErrorMessage(null);
     setIsSuccess(false);
-    setCurrentScreen(1);
+    if (currentScreen === 2) {
+      setCurrentScreen(1);
+    } else if (currentScreen === 1) {
+      setCurrentScreen(0);
+    }
   };
 
   const handleOpenPortal = () => {
@@ -193,12 +206,7 @@ export const SetupWizard: React.FC<SetupWizardProps> = ({
 
       if (res && res.success) {
         setIsSuccess(true);
-        speak("Brain connected. I'm ready.");
-        if (onComplete) {
-          setTimeout(() => {
-            onComplete(selectedProvider.id);
-          }, 1200);
-        }
+        setCurrentScreen(3);
       } else {
         setErrorMessage(res?.error || "Validation failed. Please check your key.");
       }
@@ -212,12 +220,7 @@ export const SetupWizard: React.FC<SetupWizardProps> = ({
 
   const handleOllamaFinish = () => {
     setIsSuccess(true);
-    speak("Brain connected. I'm ready.");
-    if (onComplete) {
-      setTimeout(() => {
-        onComplete("ollama");
-      }, 800);
-    }
+    setCurrentScreen(3);
   };
 
   return (
@@ -235,16 +238,34 @@ export const SetupWizard: React.FC<SetupWizardProps> = ({
               ← Back
             </button>
           )}
+          {currentScreen === 1 && (
+            <button
+              className="btn-back"
+              onClick={handleBack}
+              data-testid="btn-back-to-welcome"
+              aria-label="Back"
+            >
+              ← Back
+            </button>
+          )}
           <div className="setup-title-group">
             <h2 className="setup-title">
-              {currentScreen === 1
+              {currentScreen === 0
+                ? "Welcome to HeyBloopie"
+                : currentScreen === 1
                 ? "Choose Your AI Brain"
-                : `Set Up ${selectedProvider.name}`}
+                : currentScreen === 2
+                ? `Set Up ${selectedProvider.name}`
+                : "HeyBloopie is Ready"}
             </h2>
             <p className="setup-subtitle">
-              {currentScreen === 1
+              {currentScreen === 0
+                ? "Your hands-free desktop executive"
+                : currentScreen === 1
                 ? "HeyBloopie is provider-agnostic. Pick your preferred AI provider to get started."
-                : `Connect ${selectedProvider.name} to start managing files with hands-free voice.`}
+                : currentScreen === 2
+                ? `Connect ${selectedProvider.name} to start managing files with hands-free voice.`
+                : "Setup complete! Everything is configured."}
             </p>
           </div>
           {onCancel && (
@@ -253,6 +274,45 @@ export const SetupWizard: React.FC<SetupWizardProps> = ({
             </button>
           )}
         </div>
+
+        {/* SCREEN 0: Welcome Screen */}
+        {currentScreen === 0 && (
+          <div className="screen-welcome" data-testid="screen-welcome" style={{ padding: "24px 16px", textAlign: "center" }}>
+            <div style={{
+              width: "60px",
+              height: "60px",
+              margin: "0 auto 20px auto",
+              background: "linear-gradient(135deg, #6366f1, #3b82f6)",
+              borderRadius: "18px",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              fontSize: "28px",
+              boxShadow: "0 10px 25px rgba(99, 102, 241, 0.4)",
+            }}>
+              🤖
+            </div>
+            <p style={{
+              fontSize: "15px",
+              color: "#cbd5e1",
+              lineHeight: "1.7",
+              maxWidth: "460px",
+              margin: "0 auto 32px auto",
+            }}>
+              HeyBloopie is your background executive. It finds, organizes, renames, and moves your files through natural language. Let's set up your AI brain.
+            </p>
+            <div className="setup-footer" style={{ justifyContent: "center" }}>
+              <button
+                className="btn-primary"
+                onClick={() => setCurrentScreen(1)}
+                data-testid="btn-welcome-next"
+                style={{ padding: "12px 28px", fontSize: "14px", borderRadius: "10px" }}
+              >
+                Set Up AI Brain →
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* SCREEN 1: Choose Provider */}
         {currentScreen === 1 && (
@@ -439,6 +499,53 @@ export const SetupWizard: React.FC<SetupWizardProps> = ({
                 )}
               </div>
             )}
+          </div>
+        )}
+
+        {/* SCREEN 3: Ready Screen */}
+        {currentScreen === 3 && (
+          <div className="screen-ready" data-testid="screen-ready" style={{ padding: "24px 16px", textAlign: "center" }}>
+            <div
+              style={{
+                width: "64px",
+                height: "64px",
+                margin: "0 auto 20px auto",
+                background: "linear-gradient(135deg, #10b981, #059669)",
+                borderRadius: "20px",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                fontSize: "30px",
+                color: "#ffffff",
+                boxShadow: "0 10px 25px rgba(16, 185, 129, 0.4)",
+              }}
+            >
+              ✓
+            </div>
+            <h3 style={{ fontSize: "20px", fontWeight: "600", color: "#f8fafc", marginBottom: "12px" }}>
+              HeyBloopie is Ready
+            </h3>
+            <p
+              style={{
+                fontSize: "15px",
+                color: "#cbd5e1",
+                lineHeight: "1.7",
+                maxWidth: "460px",
+                margin: "0 auto 32px auto",
+              }}
+            >
+              HeyBloopie is ready. Press <strong>Ctrl+Shift+Space</strong> or say <em>"Hey Bloopie"</em> to start.
+            </p>
+            <div className="setup-footer" style={{ justifyContent: "center" }}>
+              <button
+                className="btn-primary"
+                onClick={() => onComplete?.(selectedProvider.id)}
+                data-testid="btn-finish-ready"
+                style={{ padding: "12px 28px", fontSize: "15px", borderRadius: "10px" }}
+              >
+                Start Using HeyBloopie →
+              </button>
+            </div>
           </div>
         )}
       </div>

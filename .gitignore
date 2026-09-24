@@ -1,0 +1,31 @@
+# Dependencies
+node_modules/
+dist/
+
+# Rust / Tauri build artifacts
+src-tauri/target/
+target/
+
+# Tauri private signing keys
+*.key
+*.key.pub
+.tauri/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+
+# Databases & local user files
+*.db
+*.db-shm
+*.db-wal
+heybloopie.db
+
+# Environment & temporary
+.env
+.env.local
+*.log
+scratch/
