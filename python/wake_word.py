@@ -114,7 +114,7 @@ class WakeWordDetector:
             )
 
         try:
-            import pvporcupine
+            import pvporcupine  # type: ignore
         except ImportError:
             logger.error("pvporcupine library is not installed. Falling back to hotkey.")
             if self.fallback_callback:
@@ -142,7 +142,7 @@ class WakeWordDetector:
 
         # Open default microphone using pvrecorder
         try:
-            import pvrecorder
+            import pvrecorder  # type: ignore
             self._recorder = pvrecorder.PvRecorder(frame_length=self._porcupine.frame_length)
             self._recorder.start()
         except Exception as err:
