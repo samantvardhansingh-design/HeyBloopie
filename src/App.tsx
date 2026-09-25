@@ -3,6 +3,7 @@ import Overlay from "./components/Overlay";
 import SetupWizard from "./components/SetupWizard";
 import SettingsWindow from "./components/SettingsWindow";
 import { useUpdater } from "./hooks/useUpdater";
+import { safeInvoke } from "./utils/tauriBridge";
 
 export interface AppProps {
   initialView?: "overlay" | "setup" | "settings";
@@ -17,13 +18,7 @@ export const App: React.FC<AppProps> = ({ initialView, invokeFn }) => {
     if (invokeFn) {
       return invokeFn(cmd, args);
     }
-    try {
-      const { invoke } = await import("@tauri-apps/api/core");
-      return await invoke(cmd, args);
-    } catch (err) {
-      console.warn(`Tauri invoke('${cmd}') fallback:`, err);
-      return null;
-    }
+    return await safeInvoke(cmd, args);
   };
 
   useEffect(() => {

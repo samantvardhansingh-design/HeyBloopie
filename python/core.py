@@ -40,12 +40,21 @@ AVAILABLE_TOOLS: List[Dict[str, Any]] = [
             "date_range": "Optional filter ('today', 'yesterday', 'last_week', 'last_month', 'last_year')",
             "path": "Optional specific directory to search within",
         },
-    }
+    },
+    {
+        "name": "delete_file",
+        "description": "Permanently deletes a file, or finds and deletes the latest matching file if query/path is provided (e.g. 'last screenshot').",
+        "parameters": {
+            "path": "Full path to the file or directory to delete (string, optional)",
+            "query": "Search string or descriptor for the file to delete (e.g. 'last screenshot', 'screenshot') (string, optional)",
+        },
+    },
 ]
 
 # Dispatch map from tool name to callable tool implementation
 TOOL_DISPATCH: Dict[str, Callable] = {
     "find_files": tools.find_files,
+    "delete_file": tools.delete_file,
 }
 
 
@@ -368,6 +377,8 @@ async def run(user_request: str) -> ExecutionReport:
         if success:
             found_count = 0
             has_find_files = False
+            has_delete_file = False
+            deleted_name = ""
             for d in details:
                 if d.get("step") == "find_files":
                     has_find_files = True
@@ -376,7 +387,14 @@ async def run(user_request: str) -> ExecutionReport:
                         found_count += len(data)
                     elif isinstance(data, int):
                         found_count += data
-            if has_find_files:
+                elif d.get("step") == "delete_file":
+                    has_delete_file = True
+                    data = d.get("data")
+                    if isinstance(data, dict):
+                        deleted_name = data.get("name", "")
+            if has_delete_file:
+                summary = f"Done. Deleted {deleted_name or 'file'} successfully."
+            elif has_find_files:
                 summary = f"Done. Found {found_count} file{'s' if found_count != 1 else ''}."
             else:
                 summary = f"Done. {steps_succeeded} step{'s' if steps_succeeded != 1 else ''} completed."

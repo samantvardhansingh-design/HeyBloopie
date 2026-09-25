@@ -16,11 +16,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 
-# Ensure python directory is in sys.path
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "python")))
 
-import memory
-from model_registry import ModelRegistry, is_cache_expired
+from python import memory
+from python.model_registry import ModelRegistry, is_cache_expired
 
 
 @pytest.fixture

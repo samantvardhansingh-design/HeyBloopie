@@ -236,31 +236,114 @@ async def find_files(
         )
 
 
-async def move_file(source_path: str, destination_path: str) -> Dict[str, Any]:
-    """Moves a file from a source path to a destination path asynchronously."""
-    raise NotImplementedError("move_file will be implemented in subsequent phase.")
+async def delete_file(
+    path: Optional[str] = None,
+    query: Optional[str] = None,
+    policy_engine: Optional[PolicyEngine] = None,
+) -> ToolResult:
+    """Deletes a file safely within approved directories after policy checks.
 
+    Args:
+        path: Direct file path, or directory containing the file.
+        query: Optional filename match query (e.g. 'screenshot') to find target file if path is a directory or None.
+        policy_engine: Optional policy engine instance.
 
-async def rename_file(target_path: str, new_name: str) -> Dict[str, Any]:
-    """Renames an existing file within its parent directory."""
-    raise NotImplementedError("rename_file will be implemented in subsequent phase.")
+    Returns:
+        ToolResult with deletion status, deleted file path, and verification.
+    """
+    try:
+        policy = policy_engine or PolicyEngine()
+        target_path = None
 
+        # Case 1: Direct file path provided and exists
+        if path and os.path.isfile(path):
+            target_path = os.path.realpath(path)
 
-async def create_folder(folder_path: str) -> Dict[str, Any]:
-    """Creates a new folder or nested directory path."""
-    raise NotImplementedError("create_folder will be implemented in subsequent phase.")
+        # Case 2: path is a directory or None, or file doesn't exist -> search for the file
+        if not target_path:
+            candidate_dirs = []
+            if path and os.path.isdir(path):
+                candidate_dirs.append(os.path.realpath(path))
+            else:
+                home = os.path.expanduser("~")
+                known_screen_dirs = [
+                    os.path.join(home, "OneDrive", "Pictures", "Screenshots"),
+                    os.path.join(home, "Pictures", "Screenshots"),
+                    os.path.join(home, "Downloads"),
+                    os.path.join(home, "Desktop"),
+                ]
+                for kd in known_screen_dirs:
+                    if os.path.isdir(kd):
+                        candidate_dirs.append(kd)
+                candidate_dirs.extend(policy.get_approved_paths())
 
+            matches = []
+            search_query = (query or "screenshot").lower()
+            for c_dir in candidate_dirs:
+                if not os.path.isdir(c_dir):
+                    continue
+                try:
+                    for fname in os.listdir(c_dir):
+                        if fname.startswith(".") or fname.startswith("$"):
+                            continue
+                        f_full = os.path.join(c_dir, fname)
+                        if not os.path.isfile(f_full):
+                            continue
+                        if search_query in fname.lower() or ("screenshot" in search_query and any(ext in fname.lower() for ext in [".png", ".jpg", ".jpeg"])):
+                            try:
+                                stat = os.stat(f_full)
+                                matches.append((stat.st_mtime, f_full, fname))
+                            except OSError:
+                                pass
+                except OSError:
+                    continue
 
-async def list_folder(folder_path: str, recursive: bool = False, max_depth: int = 1) -> Dict[str, Any]:
-    """Lists entries and subdirectories within an approved folder."""
-    raise NotImplementedError("list_folder will be implemented in subsequent phase.")
+            if matches:
+                matches.sort(key=lambda x: x[0], reverse=True)
+                target_path = matches[0][1]
 
+        if not target_path or not os.path.exists(target_path):
+            return ToolResult(
+                success=False,
+                data=None,
+                message=f"No matching file found to delete (path='{path}', query='{query}').",
+                verified=False,
+                verification_details="Target file does not exist.",
+            )
 
-async def get_file_metadata(file_path: str) -> Dict[str, Any]:
-    """Retrieves file system attributes and metadata for a specific path."""
-    raise NotImplementedError("get_file_metadata will be implemented in subsequent phase.")
+        # Step 2: Policy check BEFORE deletion
+        policy_decision = policy.check_action("delete_file", {"path": target_path})
+        if not policy_decision.allowed:
+            return ToolResult(
+                success=False,
+                data=None,
+                message=f"Action denied by policy: {policy_decision.reason}",
+                verified=False,
+                verification_details="Deletion aborted by security policy.",
+            )
 
+        # Step 3: Delete the file on disk
+        deleted_file_name = os.path.basename(target_path)
+        await asyncio.to_thread(os.remove, target_path)
 
-async def read_file_content(file_path: str, max_bytes: int = 1048576) -> Dict[str, Any]:
-    """Reads safe, text-based file contents up to a specified maximum byte limit."""
-    raise NotImplementedError("read_file_content will be implemented in subsequent phase.")
+        # Step 4: Verify outcome on disk
+        is_gone = not os.path.exists(target_path)
+
+        return ToolResult(
+            success=is_gone,
+            data={"deleted_file": target_path, "name": deleted_file_name},
+            message=f"Successfully deleted '{deleted_file_name}'.",
+            verified=is_gone,
+            verification_details=f"Verified file no longer exists at '{target_path}'." if is_gone else "File could not be removed.",
+        )
+
+    except Exception as err:
+        logger.error(f"delete_file failed with exception: {err}")
+        return ToolResult(
+            success=False,
+            data=None,
+            message=f"Deletion failed: {err}",
+            verified=False,
+            verification_details="Deletion operation threw an exception.",
+        )
+

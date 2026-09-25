@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from "react";
 import { useUpdater } from "../hooks/useUpdater";
+import { safeInvoke } from "../utils/tauriBridge";
 
 export interface SettingsWindowProps {
   onClose: () => void;
@@ -43,13 +44,7 @@ export const SettingsWindow: React.FC<SettingsWindowProps> = ({
     if (invokeFn) {
       return invokeFn(cmd, args);
     }
-    try {
-      const { invoke } = await import("@tauri-apps/api/core");
-      return await invoke(cmd, args);
-    } catch (err) {
-      console.warn(`Tauri invoke('${cmd}') fallback:`, err);
-      return null;
-    }
+    return await safeInvoke(cmd, args);
   };
 
   useEffect(() => {

@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from "react";
 import { useSpeechSynthesis } from "../hooks/useSpeechSynthesis";
+import { safeInvoke } from "../utils/tauriBridge";
 
 export interface ProviderOption {
   id: string;
@@ -119,18 +120,12 @@ export const SetupWizard: React.FC<SetupWizardProps> = ({
   const selectedProvider =
     PROVIDERS.find((p) => p.id === selectedProviderId) || PROVIDERS[0];
 
-  // Helper to execute Tauri invoke calls safely
+  // Helper to execute Tauri invoke calls safely (supporting browser fallback)
   const callTauri = async (cmd: string, args?: any): Promise<any> => {
     if (invokeFn) {
       return invokeFn(cmd, args);
     }
-    try {
-      const { invoke } = await import("@tauri-apps/api/core");
-      return await invoke(cmd, args);
-    } catch (err) {
-      console.warn(`Tauri invoke('${cmd}') fallback:`, err);
-      throw err;
-    }
+    return await safeInvoke(cmd, args);
   };
 
   // Speak ready message when entering Screen 3

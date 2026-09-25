@@ -12,6 +12,7 @@ import {
   FileText,
   AlertTriangle,
 } from "lucide-react";
+import { safeInvoke } from "../utils/tauriBridge";
 
 export interface ExecutionReport {
   success: boolean;
@@ -107,8 +108,7 @@ export const Overlay: React.FC<OverlayProps> = ({ onClose, onOpenSettings, onRun
         if (onRun) {
           result = await onRun(cleanPrompt);
         } else {
-          const { invoke } = await import("@tauri-apps/api/core");
-          result = await invoke("run_core", { request: cleanPrompt });
+          result = await safeInvoke("run_core", { request: cleanPrompt });
         }
 
         if (!result) {
