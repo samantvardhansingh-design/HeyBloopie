@@ -77,6 +77,10 @@ export const App: React.FC<AppProps> = ({ initialView, invokeFn }) => {
     setView("overlay");
   };
 
+  const handleRunCore = async (userRequest: string) => {
+    return await callTauri("run_core", { request: userRequest });
+  };
+
   return (
     <main style={{ width: "100%", height: "100%" }}>
       {isUpdating && (
@@ -137,7 +141,10 @@ export const App: React.FC<AppProps> = ({ initialView, invokeFn }) => {
       )}
 
       {view === "overlay" && (
-        <Overlay onOpenSettings={() => setView("settings")} />
+        <Overlay
+          onOpenSettings={() => setView("settings")}
+          onRun={handleRunCore}
+        />
       )}
     </main>
   );

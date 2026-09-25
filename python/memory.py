@@ -108,6 +108,7 @@ class Memory:
             # Enable WAL mode for high concurrency
             self.conn.execute("PRAGMA journal_mode=WAL;")
             self._migrate()
+            print(f"Memory initialized. DB path: {self.db_path}")
         except Exception as e:
             logger.error(f"Failed to initialize Memory database at {self.db_path}: {e}")
 

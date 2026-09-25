@@ -39,14 +39,20 @@ fn open_settings(app: &AppHandle) {
 
 fn run_python_cmd(code: &str) -> Result<String, String> {
     let output = Command::new("python")
-        .args(["-c", code])
+        .args(["-u", "-c", code])
         .output()
         .map_err(|e| format!("Failed to invoke python: {}", e))?;
 
+    let stdout_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr_str = String::from_utf8_lossy(&output.stderr).trim().to_string();
+
     if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+        Ok(stdout_str)
     } else {
-        Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
+        if !stderr_str.is_empty() {
+            eprintln!("{}", stderr_str);
+        }
+        Err(stderr_str)
     }
 }
 
@@ -149,11 +155,21 @@ fn start_wake_word() -> bool {
 #[tauri::command]
 fn run_core(request: String) -> Result<serde_json::Value, String> {
     let script = format!(
-        "import asyncio, json, dataclasses; from python import core; r = asyncio.run(core.run({:?})); print(json.dumps(dataclasses.asdict(r)))",
+        "import asyncio, json, dataclasses; from python import core; r = asyncio.run(core.run({:?})); print('__JSON_START__' + json.dumps(dataclasses.asdict(r)))",
         request
     );
     let output = run_python_cmd(&script)?;
-    serde_json::from_str(&output).map_err(|e| e.to_string())
+    println!("{}", output);
+
+    for line in output.lines().rev() {
+        if let Some(json_str) = line.strip_prefix("__JSON_START__") {
+            return serde_json::from_str(json_str).map_err(|e| e.to_string());
+        }
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+            return Ok(v);
+        }
+    }
+    Err("Failed to parse JSON result from python core output".to_string())
 }
 
 fn main() {

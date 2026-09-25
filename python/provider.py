@@ -148,6 +148,17 @@ async def generate_plan(prompt: str, options: Optional[dict] = None) -> str:
         except Exception as e:
             logger.debug(f"Could not route specific model {chosen_model} via registry: {e}")
 
+    # Check active_provider preference from memory first
+    try:
+        from python import memory
+        active_prov = (memory.get_preference("active_provider") or "").lower().strip()
+        if active_prov:
+            provider_inst = factory.get_provider(active_prov)
+            if await provider_inst.is_available():
+                return await provider_inst.generate(prompt, options=options)
+    except Exception as e:
+        logger.debug(f"Could not route to active_provider: {e}")
+
     available = factory.list_available_providers()
     if "gemini" in available:
         provider = factory.get_provider("gemini")
@@ -160,7 +171,7 @@ async def generate_plan(prompt: str, options: Optional[dict] = None) -> str:
 
 
 PROVIDER_PREFIXES = {
-    "gemini": "AIzaSy",
+    "gemini": ("AIzaSy", "AQ."),
     "openai": "sk-",
     "anthropic": "sk-ant-",
     "openrouter": "sk-or-",
@@ -190,11 +201,14 @@ async def validate_provider_key(provider: str, key: str) -> Dict[str, Any]:
 
     # 1. Format validation
     expected_prefix = PROVIDER_PREFIXES.get(prov)
-    if expected_prefix and not clean_key.startswith(expected_prefix):
-        return {
-            "success": False,
-            "error": f"That doesn't look like a valid key. Make sure you copied the full key. It usually starts with {expected_prefix}.",
-        }
+    if expected_prefix:
+        prefixes = expected_prefix if isinstance(expected_prefix, tuple) else (expected_prefix,)
+        if not any(clean_key.startswith(p) for p in prefixes):
+            display_prefix = prefixes[0]
+            return {
+                "success": False,
+                "error": f"That doesn't look like a valid key. Make sure you copied the full key. It usually starts with {display_prefix}.",
+            }
 
     # 2. Minimal API Call
     try:
@@ -202,9 +216,15 @@ async def validate_provider_key(provider: str, key: str) -> Dict[str, Any]:
             from google import genai
             client = genai.Client(api_key=clean_key)
             if hasattr(client, "aio") and hasattr(client.aio, "models"):
-                await client.aio.models.get(model="gemini-2.5-flash-lite")
+                try:
+                    await client.aio.models.list()
+                except Exception:
+                    await client.aio.models.get(model="gemini-2.5-flash-lite")
             else:
-                client.models.get(model="gemini-2.5-flash-lite")
+                try:
+                    client.models.list()
+                except Exception:
+                    client.models.get(model="gemini-2.5-flash-lite")
 
         elif prov == "openai":
             import openai

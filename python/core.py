@@ -117,6 +117,7 @@ async def run(user_request: str) -> ExecutionReport:
     Returns:
         ExecutionReport detailing overall success, per-step results, and any exceptions.
     """
+    print(f"=== Core Loop Started for request: {user_request} ===")
     start_time = time.time()
     plan = None
 
@@ -133,14 +134,24 @@ async def run(user_request: str) -> ExecutionReport:
         is_reuse = any(trigger in user_request.lower() for trigger in reuse_triggers)
 
         if is_reuse:
+            if "same as last time" in user_request.lower():
+                print("Detected 'same as last time'. Looking up memory...")
+            else:
+                print("Detected plan reuse trigger. Looking up memory...")
             similar = memory.find_similar_task(user_request)
             if similar and similar.get("plan_json"):
                 plan = _parse_plan_json(similar["plan_json"])
+                if plan:
+                    print(f"Plan retrieved from memory: {plan.summary}")
+                    logger.info(f"Plan retrieved from memory: {plan.summary}")
+            if not plan:
+                print("No matching plan found in memory.")
 
         selected_model: Optional[str] = None
         selected_provider: Optional[str] = None
 
         if plan is None:
+            print("Calling Planner...")
             router = model_router.ModelRouter(memory=memory.get_memory())
             fallback_models: List[Optional[str]] = []
             try:
@@ -181,6 +192,9 @@ async def run(user_request: str) -> ExecutionReport:
                         continue
                     raise
 
+            if plan is not None:
+                print(f"Plan received: {plan.summary}")
+
             if plan is None and last_fallback_error:
                 report = ExecutionReport(
                     success=False,
@@ -211,7 +225,10 @@ async def run(user_request: str) -> ExecutionReport:
                 steps_failed=0,
             )
             duration_ms = int((time.time() - start_time) * 1000)
+            print("Logging task to memory...")
             memory.log_task(user_request, plan, report, duration_ms)
+            print("Task logged successfully.")
+            print("=== Core Loop Finished ===")
             return report
 
         # Step 3: If the plan requires confirmation (any MEDIUM/HIGH step)
@@ -238,7 +255,7 @@ async def run(user_request: str) -> ExecutionReport:
         steps_failed = 0
 
         for idx, step in enumerate(plan.steps, 1):
-            print(f"Executing step {idx}/{len(plan.steps)}: {step.description}")
+            print(f"Executing step {idx}: {step.tool_name} with params {step.params}")
 
             # a. Call policy.check_action(step.tool_name, step.params)
             try:
@@ -262,6 +279,7 @@ async def run(user_request: str) -> ExecutionReport:
             if not is_allowed:
                 logger.warning(f"Step denied by policy: {step.tool_name} - {reason}")
                 print(f"Step denied by policy: {step.tool_name} - {reason}")
+                print(f"Step {idx} result: failure")
                 steps_failed += 1
                 exceptions.append({
                     "step": step.tool_name,
@@ -319,6 +337,7 @@ async def run(user_request: str) -> ExecutionReport:
 
             if result is None or not getattr(result, "success", False):
                 steps_failed += 1
+                print(f"Step {idx} result: failure")
                 fail_reason = getattr(result, "message", None) or error_msg or "Tool execution failed"
                 exceptions.append({
                     "step": step.tool_name,
@@ -329,6 +348,7 @@ async def run(user_request: str) -> ExecutionReport:
 
             # g. If result.verified is False, add a warning to details but do not fail the step
             steps_succeeded += 1
+            print(f"Step {idx} result: success")
             step_detail = {
                 "step": step.tool_name,
                 "params": step.params,
@@ -376,6 +396,7 @@ async def run(user_request: str) -> ExecutionReport:
             steps_failed=steps_failed,
         )
         duration_ms = int((time.time() - start_time) * 1000)
+        print("Logging task to memory...")
         try:
             memory.log_task(
                 user_request,
@@ -385,8 +406,11 @@ async def run(user_request: str) -> ExecutionReport:
                 provider=selected_provider if 'selected_provider' in locals() else None,
                 model=selected_model if 'selected_model' in locals() else None,
             )
+            print("Task logged successfully.")
         except Exception as log_err:
             logger.warning(f"Failed to log task execution to memory: {log_err}")
+            print(f"Task logging failed: {log_err}")
+        print("=== Core Loop Finished ===")
         return report
 
     except Exception as e:
@@ -408,7 +432,7 @@ async def run(user_request: str) -> ExecutionReport:
         return report
 
 
-def is_wake_word_enabled(db_path: str = "heybloopie.db") -> bool:
+def is_wake_word_enabled(db_path: Optional[str] = None) -> bool:
     """Checks whether the user has enabled wake word detection in preferences."""
     try:
         mem = memory.Memory(db_path=db_path)

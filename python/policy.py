@@ -6,7 +6,7 @@ This is a hard, code-level constraint that cannot be bypassed by prompts or mode
 """
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 import json
 import logging
@@ -74,8 +74,12 @@ class PolicyResult:
 class PolicyEngine:
     """Security engine enforcing least privilege, path sandboxing, and confirmation gating."""
 
-    def __init__(self, db_path: str = "heybloopie.db"):
-        self.db_path = db_path
+    def __init__(self, db_path: Optional[str] = None):
+        if db_path is None or db_path == "heybloopie.db":
+            from python import memory
+            self.db_path = memory.get_default_db_path()
+        else:
+            self.db_path = db_path
         self._init_db()
 
     def _get_connection(self) -> sqlite3.Connection:
@@ -92,7 +96,8 @@ class PolicyEngine:
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS preferences (
                 key TEXT PRIMARY KEY,
-                value TEXT
+                value TEXT,
+                updated_at TEXT
             )
         """)
 
@@ -119,12 +124,13 @@ class PolicyEngine:
             )
         """)
 
+        now = datetime.now(timezone.utc).isoformat()
         # Set default allowed tools (LOW risk tools only on first run)
         cursor.execute("SELECT value FROM preferences WHERE key = 'allowed_tools'")
         if cursor.fetchone() is None:
             cursor.execute(
-                "INSERT INTO preferences (key, value) VALUES (?, ?)",
-                ("allowed_tools", json.dumps(DEFAULT_LOW_RISK_TOOLS))
+                "INSERT INTO preferences (key, value, updated_at) VALUES (?, ?, ?)",
+                ("allowed_tools", json.dumps(DEFAULT_LOW_RISK_TOOLS), now)
             )
 
         # Set default approved paths (user home directory on first run)
@@ -132,8 +138,8 @@ class PolicyEngine:
         if cursor.fetchone() is None:
             home_dir = os.path.realpath(os.path.expanduser("~"))
             cursor.execute(
-                "INSERT INTO preferences (key, value) VALUES (?, ?)",
-                ("approved_paths", json.dumps([home_dir]))
+                "INSERT INTO preferences (key, value, updated_at) VALUES (?, ?, ?)",
+                ("approved_paths", json.dumps([home_dir]), now)
             )
 
         conn.commit()
@@ -155,11 +161,12 @@ class PolicyEngine:
 
     def set_allowed_tools(self, tools: List[str]) -> None:
         """Updates the allowed tools list in SQLite preferences."""
+        now = datetime.now(timezone.utc).isoformat()
         conn = self._get_connection()
         cursor = conn.cursor()
         cursor.execute(
-            "INSERT OR REPLACE INTO preferences (key, value) VALUES (?, ?)",
-            ("allowed_tools", json.dumps(tools))
+            "INSERT OR REPLACE INTO preferences (key, value, updated_at) VALUES (?, ?, ?)",
+            ("allowed_tools", json.dumps(tools), now)
         )
         conn.commit()
         conn.close()
@@ -182,11 +189,12 @@ class PolicyEngine:
     def set_approved_paths(self, paths: List[str]) -> None:
         """Updates approved paths list in SQLite preferences."""
         canonical_paths = [os.path.realpath(p) for p in paths]
+        now = datetime.now(timezone.utc).isoformat()
         conn = self._get_connection()
         cursor = conn.cursor()
         cursor.execute(
-            "INSERT OR REPLACE INTO preferences (key, value) VALUES (?, ?)",
-            ("approved_paths", json.dumps(canonical_paths))
+            "INSERT OR REPLACE INTO preferences (key, value, updated_at) VALUES (?, ?, ?)",
+            ("approved_paths", json.dumps(canonical_paths), now)
         )
         conn.commit()
         conn.close()

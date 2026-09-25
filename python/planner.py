@@ -158,8 +158,12 @@ async def create_plan(
         return await provider.generate_plan(prompt_str)
 
     # Step 1 & 2: Call provider.generate_plan
+    logger.info("Planner is asking LLM for a plan...")
+    print("Planner is asking LLM for a plan...")
     try:
         raw_response = await _call_generate_plan(prompt)
+        logger.info(f"LLM returned plan: {raw_response}")
+        print(f"LLM returned plan: {raw_response}")
         parsed = _parse_json_response(raw_response)
     except Exception as e:
         if _is_fallback_error(e):
@@ -170,7 +174,11 @@ async def create_plan(
     # Step 3: If parsing fails, retry once
     if parsed is None:
         try:
+            logger.info("Planner is asking LLM for a plan...")
+            print("Planner is asking LLM for a plan...")
             raw_response = await _call_generate_plan(prompt)
+            logger.info(f"LLM returned plan: {raw_response}")
+            print(f"LLM returned plan: {raw_response}")
             parsed = _parse_json_response(raw_response)
         except Exception as e:
             if _is_fallback_error(e):
@@ -180,6 +188,8 @@ async def create_plan(
 
     # If it fails again, return empty Plan with standard fallback summary
     if parsed is None:
+        logger.warning("Planner error: LLM returned invalid JSON or error. Returning empty plan.")
+        print("Planner error: LLM returned invalid JSON or error. Returning empty plan.")
         return Plan(
             steps=[],
             summary="I couldn't understand that request.",

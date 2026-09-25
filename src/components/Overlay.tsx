@@ -1,6 +1,17 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import { useSpeechRecognition } from "../hooks/useSpeechRecognition";
 import { useSpeechSynthesis } from "../hooks/useSpeechSynthesis";
+import {
+  Mic,
+  Square,
+  Volume2,
+  VolumeX,
+  Settings as SettingsIcon,
+  X,
+  Sparkles,
+  FileText,
+  AlertTriangle,
+} from "lucide-react";
 
 export interface ExecutionReport {
   success: boolean;
@@ -40,7 +51,7 @@ interface OverlayProps {
  * 5. Full Interruption Handling:
  *    - User speaking interrupts ongoing TTS immediately without apology.
  *    - Escape key or "Stop" button halts all speech and hides the overlay.
- * 6. Mute toggle button & Close button.
+ * 6. Mute toggle button & Close button with SVG icons & smooth micro-interactions.
  */
 export const Overlay: React.FC<OverlayProps> = ({ onClose, onOpenSettings, onRun }) => {
   const [isVisible, setIsVisible] = useState<boolean>(true);
@@ -96,30 +107,12 @@ export const Overlay: React.FC<OverlayProps> = ({ onClose, onOpenSettings, onRun
         if (onRun) {
           result = await onRun(cleanPrompt);
         } else {
-          // Tauri invoke to backend
-          try {
-            const { invoke } = await import("@tauri-apps/api/core");
-            result = await invoke("run_core", { userRequest: cleanPrompt });
-          } catch {
-            // Fallback for non-Tauri / test environments
-            result = {
-              success: true,
-              summary: `Done. Found files matching '${cleanPrompt}'.`,
-              details: [
-                {
-                  step: "find_files",
-                  params: { query: cleanPrompt },
-                  data: [
-                    { name: `${cleanPrompt}.pdf`, path: `C:\\Docs\\${cleanPrompt}.pdf` },
-                  ],
-                },
-              ],
-              exceptions: [],
-              total_steps: 1,
-              steps_succeeded: 1,
-              steps_failed: 0,
-            };
-          }
+          const { invoke } = await import("@tauri-apps/api/core");
+          result = await invoke("run_core", { request: cleanPrompt });
+        }
+
+        if (!result) {
+          throw new Error("No response received from HeyBloopie Core.");
         }
 
         setReport(result);
@@ -244,8 +237,15 @@ export const Overlay: React.FC<OverlayProps> = ({ onClose, onOpenSettings, onRun
                 ? "var(--accent-amber)"
                 : "var(--accent-blue)",
               boxShadow: isListening
-                ? "0 0 10px var(--accent-red)"
-                : "0 0 10px var(--accent-blue)",
+                ? "0 0 12px var(--accent-red)"
+                : isWorking
+                ? "0 0 12px var(--accent-amber)"
+                : "0 0 12px var(--accent-blue)",
+              animation: isListening
+                ? "statusGlowRed 1.5s infinite"
+                : isWorking
+                ? "statusGlowAmber 1.5s infinite"
+                : "statusGlowBlue 3s infinite",
             }}
           ></span>
           HeyBloopie
@@ -259,7 +259,8 @@ export const Overlay: React.FC<OverlayProps> = ({ onClose, onOpenSettings, onRun
             onClick={handleStopAndClose}
             title="Stop speaking & close overlay"
           >
-            Stop
+            <Square size={11} fill="currentColor" />
+            <span>Stop</span>
           </button>
 
           {/* Mute Toggle Button */}
@@ -273,8 +274,10 @@ export const Overlay: React.FC<OverlayProps> = ({ onClose, onOpenSettings, onRun
               setIsMuted((prev) => !prev);
             }}
             title={isMuted ? "Unmute voice responses" : "Mute voice responses"}
+            aria-label={isMuted ? "Unmute voice responses" : "Mute voice responses"}
           >
-            {isMuted ? "🔇" : "🔊"}
+            {isMuted ? <VolumeX size={15} /> : <Volume2 size={15} />}
+            <span style={{ display: "none" }}>{isMuted ? "🔇" : "🔊"}</span>
           </button>
 
           {/* Settings Button */}
@@ -284,8 +287,9 @@ export const Overlay: React.FC<OverlayProps> = ({ onClose, onOpenSettings, onRun
               data-testid="settings-btn"
               onClick={onOpenSettings}
               title="Open Settings"
+              aria-label="Open Settings"
             >
-              ⚙️
+              <SettingsIcon size={15} />
             </button>
           )}
 
@@ -295,8 +299,9 @@ export const Overlay: React.FC<OverlayProps> = ({ onClose, onOpenSettings, onRun
             data-testid="close-btn"
             onClick={handleStopAndClose}
             title="Close overlay (Esc)"
+            aria-label="Close overlay"
           >
-            ✕
+            <X size={15} />
           </button>
         </div>
       </div>
@@ -306,7 +311,7 @@ export const Overlay: React.FC<OverlayProps> = ({ onClose, onOpenSettings, onRun
         {isWorking ? (
           <div className="working-indicator" data-testid="working-indicator">
             <div className="spinner"></div>
-            <span>Working...</span>
+            <span>Thinking & searching...</span>
           </div>
         ) : report ? (
           <div className="report-card" data-testid="report-card">
@@ -322,7 +327,10 @@ export const Overlay: React.FC<OverlayProps> = ({ onClose, onOpenSettings, onRun
                     <div className="file-list">
                       {detail.data.map((item: any, fIdx: number) => (
                         <div key={fIdx} className="file-item">
-                          <span className="file-name">{item.name || item.path}</span>
+                          <div className="file-item-left">
+                            <FileText size={14} className="file-icon" />
+                            <span className="file-name">{item.name || item.path}</span>
+                          </div>
                           {item.path && item.name && (
                             <span className="file-path">{item.path}</span>
                           )}
@@ -331,15 +339,16 @@ export const Overlay: React.FC<OverlayProps> = ({ onClose, onOpenSettings, onRun
                     </div>
                   )}
                   {detail.warning && (
-                    <p style={{ color: "var(--accent-amber)", fontSize: "0.85rem", marginTop: "6px" }}>
-                      ⚠️ {detail.warning}
-                    </p>
+                    <div className="report-warning">
+                      <AlertTriangle size={14} />
+                      <span>{detail.warning}</span>
+                    </div>
                   )}
                 </div>
               ))}
           </div>
         ) : (
-          <p style={{ color: "var(--text-secondary)", fontSize: "0.95rem" }}>
+          <p className="hud-prompt-placeholder">
             {isListening
               ? "Listening... Speak your request."
               : "Say 'Hey Bloopie' or type a command to manage your files..."}
@@ -361,8 +370,9 @@ export const Overlay: React.FC<OverlayProps> = ({ onClose, onOpenSettings, onRun
           data-testid="mic-btn"
           onClick={handleMicClick}
           title={isListening ? "Listening..." : "Click to speak"}
+          aria-label={isListening ? "Listening..." : "Click to speak"}
         >
-          🎤
+          <Mic size={17} />
         </button>
 
         <input
@@ -371,10 +381,12 @@ export const Overlay: React.FC<OverlayProps> = ({ onClose, onOpenSettings, onRun
           placeholder="e.g. Find all receipts from last month in Downloads"
           value={inputText}
           onChange={(e) => setInputText(e.target.value)}
+          autoFocus
         />
 
         <button type="submit" className="hud-btn" data-testid="submit-btn">
-          Ask
+          <Sparkles size={14} />
+          <span>Ask</span>
         </button>
       </form>
     </div>

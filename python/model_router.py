@@ -143,10 +143,12 @@ class ModelRouter:
             add_model(m["id"])
 
         # 4. Paid Fallback (cheapest input price first, then larger context window)
-        if allow_paid:
+        # Allowed if allow_paid is True OR if the active_provider itself is a paid provider (e.g. openai, anthropic)
+        if allow_paid or (active_provider in ("openai", "anthropic")):
             sorted_paid = sorted(
                 paid_models,
                 key=lambda m: (
+                    0 if m.get("provider", "").lower() == active_provider else 1,
                     m.get("input_price", float("inf")) or 0.0,
                     -(m.get("context_length", 0) or 0),
                 ),
