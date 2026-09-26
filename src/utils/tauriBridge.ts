@@ -12,8 +12,16 @@ export async function safeInvoke<T = any>(
     Boolean((window as any).__TAURI_INTERNALS__ || (window as any).__TAURI__);
 
   const isTest =
-    typeof process !== "undefined" &&
-    (process.env.NODE_ENV === "test" || Boolean((process.env as any).VITEST));
+    (typeof import.meta !== "undefined" &&
+      Boolean(
+        (import.meta as any).env?.MODE === "test" ||
+          (import.meta as any).env?.VITEST
+      )) ||
+    (typeof globalThis !== "undefined" &&
+      Boolean(
+        (globalThis as any).process?.env?.VITEST ||
+          (globalThis as any).process?.env?.NODE_ENV === "test"
+      ));
 
   // 1. Native Tauri Desktop OR Unit Test Environment
   if (isTauri || isTest) {
