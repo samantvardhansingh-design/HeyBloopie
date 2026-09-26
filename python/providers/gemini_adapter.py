@@ -63,19 +63,20 @@ class GeminiAdapter(AIProvider):
             seen = set()
             candidate_models = [m for m in models_to_try if m and not (m in seen or seen.add(m))]
 
+            config = None
+            if options and options.get("max_tokens"):
+                config = {"max_output_tokens": options["max_tokens"]}
+
             last_error = None
             for model_candidate in candidate_models:
                 try:
+                    kwargs = {"model": model_candidate, "contents": prompt}
+                    if config:
+                        kwargs["config"] = config
                     if hasattr(client, "aio") and hasattr(client.aio, "models"):
-                        response = await client.aio.models.generate_content(
-                            model=model_candidate,
-                            contents=prompt,
-                        )
+                        response = await client.aio.models.generate_content(**kwargs)
                     else:
-                        response = client.models.generate_content(
-                            model=model_candidate,
-                            contents=prompt,
-                        )
+                        response = client.models.generate_content(**kwargs)
                     return getattr(response, "text", "") or ""
                 except Exception as m_err:
                     err_msg = str(m_err).lower()
@@ -103,20 +104,22 @@ class GeminiAdapter(AIProvider):
             client = genai.Client(api_key=key)
             model_id = (options or {}).get("model") or self.default_model
 
+            config = None
+            if options and options.get("max_tokens"):
+                config = {"max_output_tokens": options["max_tokens"]}
+
+            kwargs = {"model": model_id, "contents": prompt}
+            if config:
+                kwargs["config"] = config
+
             if hasattr(client, "aio") and hasattr(client.aio, "models"):
-                stream_resp = await client.aio.models.generate_content_stream(
-                    model=model_id,
-                    contents=prompt,
-                )
+                stream_resp = await client.aio.models.generate_content_stream(**kwargs)
                 async for chunk in stream_resp:
                     text = getattr(chunk, "text", "") or ""
                     if text:
                         yield text
             else:
-                stream_resp = client.models.generate_content_stream(
-                    model=model_id,
-                    contents=prompt,
-                )
+                stream_resp = client.models.generate_content_stream(**kwargs)
                 for chunk in stream_resp:
                     text = getattr(chunk, "text", "") or ""
                     if text:

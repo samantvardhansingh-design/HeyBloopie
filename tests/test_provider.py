@@ -354,3 +354,26 @@ def test_keys_are_never_written_to_a_file():
                 # Check for Path.write_text or write_bytes
                 if isinstance(node.func, ast.Attribute) and node.func.attr in ("write_text", "write_bytes"):
                     raise AssertionError(f"Illegal Path write operation found in {file_path}")
+
+
+@pytest.mark.asyncio
+async def test_provider_stream_generator(monkeypatch):
+    """Test top-level provider.stream() async generator yields chunks from active provider."""
+    from python import provider
+
+    async def fake_stream(prompt, options=None):
+        for c in ["Hello", " world", "!"]:
+            yield c
+
+    mock_adapter = MagicMock()
+    mock_adapter.is_available = AsyncMock(return_value=True)
+    mock_adapter.stream = fake_stream
+
+    monkeypatch.setattr(provider.ProviderFactory, "get_provider", staticmethod(lambda name: mock_adapter))
+    monkeypatch.setattr("python.memory.get_preference", lambda key: "gemini")
+
+    chunks = []
+    async for chunk in provider.stream("Test prompt"):
+        chunks.append(chunk)
+
+    assert chunks == ["Hello", " world", "!"]

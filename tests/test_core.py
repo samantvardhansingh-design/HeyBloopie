@@ -370,6 +370,7 @@ async def test_conversational_query_does_not_trigger_planner(monkeypatch):
     conversational_text = "I am HeyBloopie, a professional, calm, and capable desktop executive."
     mock_dm.process = AsyncMock(return_value=conversational_text)
     monkeypatch.setattr(core, "get_dialogue_manager", lambda: mock_dm)
+    monkeypatch.setattr(provider, "stream", None)
 
     report = await core.run("who are you")
 
@@ -380,12 +381,12 @@ async def test_conversational_query_does_not_trigger_planner(monkeypatch):
     assert report.steps_failed == 0
     assert len(report.details) == 0
     mock_planner.assert_not_called()
-    mock_dm.process.assert_awaited_once_with("who are you")
+    mock_dm.process.assert_awaited_once_with("who are you", max_tokens=120)
 
 
 @pytest.mark.asyncio
 async def test_file_command_proceeds_to_planner(monkeypatch):
-    """TEST: A [FILE_COMMAND] response from DialogueManager proceeds to existing Planner and execution logic."""
+    """TEST: A FILE_COMMAND intent proceeds directly to existing Planner and execution logic without invoking DialogueManager."""
     step = planner.PlanStep(
         tool_name="find_files",
         params={"query": "report"},
@@ -417,5 +418,41 @@ async def test_file_command_proceeds_to_planner(monkeypatch):
     assert report.success is True
     assert report.steps_succeeded == 1
     mock_planner.assert_called_once()
-    mock_dm.process.assert_awaited_once_with("find my report")
+    mock_dm.process.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_conversational_streaming_emits_sentences(monkeypatch):
+    """TEST: When a conversational response is needed, core calls stream() and emits each complete sentence."""
+    mock_planner = AsyncMock(side_effect=AssertionError("Planner should not be called!"))
+    monkeypatch.setattr(planner, "create_plan", mock_planner)
+
+    mock_dm = MagicMock()
+    mock_dm.process = AsyncMock(return_value="[CONVERSATIONAL]")
+    mock_dm._build_prompt = MagicMock(return_value="Prompt for who are you")
+    monkeypatch.setattr(core, "get_dialogue_manager", lambda: mock_dm)
+
+    # Mock provider.stream
+    async def fake_stream(prompt, options=None):
+        yield "Hello there! "
+        yield "I am HeyBloopie. "
+        yield "How may I help you with your files today?"
+
+    monkeypatch.setattr(provider, "stream", fake_stream)
+
+    emitted_sentences = []
+    core.add_event_listener("speak-sentence", lambda s: emitted_sentences.append(s))
+
+    try:
+        report = await core.run("who are you")
+        assert report.success is True
+        assert "Hello there!" in report.summary
+        assert "I am HeyBloopie." in report.summary
+        assert emitted_sentences == [
+            "Hello there!",
+            "I am HeyBloopie.",
+            "How may I help you with your files today?",
+        ]
+    finally:
+        core.clear_event_listeners()
 

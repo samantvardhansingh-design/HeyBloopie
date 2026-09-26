@@ -1,7 +1,11 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 
+export interface SpeakOptions {
+  enqueue?: boolean;
+}
+
 export interface UseSpeechSynthesisReturn {
-  speak: (text: string) => void;
+  speak: (text: string, options?: SpeakOptions | boolean) => void;
   stop: () => void;
   isSpeaking: boolean;
   voices: SpeechSynthesisVoice[];
@@ -92,7 +96,7 @@ export function useSpeechSynthesis(): UseSpeechSynthesisReturn {
   }, []);
 
   const speak = useCallback(
-    (text: string) => {
+    (text: string, options?: SpeakOptions | boolean) => {
       if (typeof window === "undefined" || !("speechSynthesis" in window)) {
         console.warn("speechSynthesis is not available in this environment.");
         return;
@@ -102,8 +106,13 @@ export function useSpeechSynthesis(): UseSpeechSynthesisReturn {
         return;
       }
 
-      // Cancel any ongoing speech before starting new utterance
-      window.speechSynthesis.cancel();
+      const shouldEnqueue =
+        typeof options === "boolean" ? options : options?.enqueue ?? false;
+
+      // Only cancel ongoing speech if enqueue is not requested
+      if (!shouldEnqueue) {
+        window.speechSynthesis.cancel();
+      }
 
       try {
         const utterance = new SpeechSynthesisUtterance(text);
@@ -120,12 +129,26 @@ export function useSpeechSynthesis(): UseSpeechSynthesisReturn {
         };
 
         utterance.onend = () => {
+          if (
+            typeof window !== "undefined" &&
+            window.speechSynthesis &&
+            window.speechSynthesis.speaking
+          ) {
+            return;
+          }
           setIsSpeaking(false);
           currentUtteranceRef.current = null;
         };
 
         utterance.onerror = (e) => {
           console.error("SpeechSynthesis error:", e);
+          if (
+            typeof window !== "undefined" &&
+            window.speechSynthesis &&
+            window.speechSynthesis.speaking
+          ) {
+            return;
+          }
           setIsSpeaking(false);
           currentUtteranceRef.current = null;
         };

@@ -1,6 +1,8 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, act } from "@testing-library/react";
 import App from "./App";
+
+const mockSpeak = vi.fn();
 
 vi.mock("./hooks/useUpdater", () => ({
   useUpdater: () => ({
@@ -22,7 +24,7 @@ vi.mock("./hooks/useSpeechRecognition", () => ({
 
 vi.mock("./hooks/useSpeechSynthesis", () => ({
   useSpeechSynthesis: () => ({
-    speak: vi.fn(),
+    speak: mockSpeak,
     stop: vi.fn(),
     isSpeaking: false,
     voices: [],
@@ -87,5 +89,36 @@ describe("App Component", () => {
     await waitFor(() => {
       expect(screen.getByTestId("overlay-container")).toBeDefined();
     });
+  });
+
+  it("Listens for speak-sentence events and speaks each sentence immediately with continuous queueing", async () => {
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === "check_onboarding_needed") return Promise.resolve(false);
+      return Promise.resolve(true);
+    });
+
+    render(<App invokeFn={mockInvoke} />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("overlay-container")).toBeDefined();
+    });
+
+    // Simulate speak-sentence events arriving sequentially from streaming TTS
+    act(() => {
+      window.dispatchEvent(
+        new CustomEvent("speak-sentence", { detail: "Hello there!" })
+      );
+    });
+
+    expect(mockSpeak).toHaveBeenCalledWith("Hello there!", { enqueue: true });
+
+    act(() => {
+      window.dispatchEvent(
+        new CustomEvent("speak-sentence", { detail: "I am HeyBloopie." })
+      );
+    });
+
+    expect(mockSpeak).toHaveBeenCalledWith("I am HeyBloopie.", { enqueue: true });
+    expect(mockSpeak).toHaveBeenCalledTimes(2);
   });
 });

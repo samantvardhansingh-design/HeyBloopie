@@ -53,6 +53,15 @@ function tauriDevBridge(): Plugin {
                 }
                 const output = stdout.trim();
                 let result: any = output;
+                const events: any[] = [];
+                for (const line of output.split("\n")) {
+                  const trimmed = line.trim();
+                  if (trimmed.startsWith("__TAURI_EVENT__")) {
+                    try {
+                      events.push(JSON.parse(trimmed.slice("__TAURI_EVENT__".length)));
+                    } catch {}
+                  }
+                }
                 for (const line of output.split("\n").reverse()) {
                   const trimmed = line.trim();
                   if (trimmed.startsWith("__JSON_START__")) {
@@ -67,7 +76,7 @@ function tauriDevBridge(): Plugin {
                   } catch {}
                 }
                 res.setHeader("Content-Type", "application/json");
-                res.end(JSON.stringify({ result }));
+                res.end(JSON.stringify({ result, events }));
               });
             } catch (e: any) {
               res.statusCode = 500;

@@ -50,11 +50,16 @@ class OpenAIAdapter(AIProvider):
         try:
             client = AsyncOpenAI(api_key=key)
             model_id = (options or {}).get("model") or self.default_model
+            max_tokens = (options or {}).get("max_tokens")
 
-            response = await client.chat.completions.create(
-                model=model_id,
-                messages=[{"role": "user", "content": prompt}],
-            )
+            create_kwargs = {
+                "model": model_id,
+                "messages": [{"role": "user", "content": prompt}],
+            }
+            if max_tokens:
+                create_kwargs["max_tokens"] = max_tokens
+
+            response = await client.chat.completions.create(**create_kwargs)
             if response.choices and response.choices[0].message:
                 return response.choices[0].message.content or ""
             return ""
@@ -72,12 +77,17 @@ class OpenAIAdapter(AIProvider):
         try:
             client = AsyncOpenAI(api_key=key)
             model_id = (options or {}).get("model") or self.default_model
+            max_tokens = (options or {}).get("max_tokens")
 
-            stream_resp = await client.chat.completions.create(
-                model=model_id,
-                messages=[{"role": "user", "content": prompt}],
-                stream=True,
-            )
+            stream_kwargs = {
+                "model": model_id,
+                "messages": [{"role": "user", "content": prompt}],
+                "stream": True,
+            }
+            if max_tokens:
+                stream_kwargs["max_tokens"] = max_tokens
+
+            stream_resp = await client.chat.completions.create(**stream_kwargs)
             async for chunk in stream_resp:
                 if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
                     yield chunk.choices[0].delta.content

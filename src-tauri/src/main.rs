@@ -153,23 +153,51 @@ fn start_wake_word() -> bool {
 }
 
 #[tauri::command]
-fn run_core(request: String) -> Result<serde_json::Value, String> {
+fn run_core(app: AppHandle, request: String) -> Result<serde_json::Value, String> {
+    use std::io::BufRead;
+
     let script = format!(
         "import asyncio, json, dataclasses; from python import core; r = asyncio.run(core.run({:?})); print('__JSON_START__' + json.dumps(dataclasses.asdict(r)))",
         request
     );
-    let output = run_python_cmd(&script)?;
-    println!("{}", output);
 
-    for line in output.lines().rev() {
-        if let Some(json_str) = line.strip_prefix("__JSON_START__") {
-            return serde_json::from_str(json_str).map_err(|e| e.to_string());
-        }
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
-            return Ok(v);
+    let mut child = Command::new("python")
+        .args(["-u", "-c", &script])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Failed to invoke python: {}", e))?;
+
+    let stdout = child.stdout.take().ok_or("Failed to open stdout")?;
+    let reader = std::io::BufReader::new(stdout);
+
+    let mut final_json: Option<serde_json::Value> = None;
+
+    for line_result in reader.lines() {
+        if let Ok(line) = line_result {
+            println!("{}", line);
+            if let Some(event_str) = line.strip_prefix("__TAURI_EVENT__") {
+                if let Ok(ev) = serde_json::from_str::<serde_json::Value>(event_str) {
+                    if let (Some(ev_name), Some(payload)) = (
+                        ev.get("event").and_then(|v| v.as_str()),
+                        ev.get("payload"),
+                    ) {
+                        let _ = app.emit(ev_name, payload.clone());
+                    }
+                }
+            } else if let Some(json_str) = line.strip_prefix("__JSON_START__") {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(json_str) {
+                    final_json = Some(v);
+                }
+            } else if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
+                final_json = Some(v);
+            }
         }
     }
-    Err("Failed to parse JSON result from python core output".to_string())
+
+    let _ = child.wait();
+
+    final_json.ok_or_else(|| "Failed to parse JSON result from python core output".to_string())
 }
 
 fn main() {

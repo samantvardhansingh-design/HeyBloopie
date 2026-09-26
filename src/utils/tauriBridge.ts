@@ -55,6 +55,15 @@ export async function safeInvoke<T = any>(
 
     if (res.ok) {
       const data = await res.json();
+      if (data && Array.isArray(data.events)) {
+        for (const ev of data.events) {
+          if (ev && ev.event) {
+            window.dispatchEvent(
+              new CustomEvent(ev.event, { detail: ev.payload })
+            );
+          }
+        }
+      }
       if (data && data.error) {
         throw new Error(data.error);
       }

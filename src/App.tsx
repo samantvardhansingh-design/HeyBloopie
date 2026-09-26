@@ -1,8 +1,9 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useState, useRef } from "react";
 import Overlay from "./components/Overlay";
 import SetupWizard from "./components/SetupWizard";
 import SettingsWindow from "./components/SettingsWindow";
 import { useUpdater } from "./hooks/useUpdater";
+import { useSpeechSynthesis } from "./hooks/useSpeechSynthesis";
 import { safeInvoke } from "./utils/tauriBridge";
 
 export interface AppProps {
@@ -13,6 +14,12 @@ export interface AppProps {
 export const App: React.FC<AppProps> = ({ initialView, invokeFn }) => {
   const [view, setView] = useState<"overlay" | "setup" | "settings">(initialView || "overlay");
   const { checkForUpdates, isUpdating, progress, statusMessage } = useUpdater();
+  const { speak } = useSpeechSynthesis();
+  const speakRef = useRef(speak);
+
+  useEffect(() => {
+    speakRef.current = speak;
+  }, [speak]);
 
   const callTauri = async (cmd: string, args?: any): Promise<any> => {
     if (invokeFn) {
@@ -46,7 +53,7 @@ export const App: React.FC<AppProps> = ({ initialView, invokeFn }) => {
 
     initApp();
 
-    // Listen to tray and backend events
+    // Listen to tray, backend, and streaming TTS events
     let unlisteners: Array<() => void> = [];
     const setupListeners = async () => {
       try {
@@ -54,15 +61,38 @@ export const App: React.FC<AppProps> = ({ initialView, invokeFn }) => {
         const u1 = await listen("open_overlay", () => setView("overlay"));
         const u2 = await listen("open_settings", () => setView("settings"));
         const u3 = await listen("check_updates", () => checkForUpdates());
-        unlisteners.push(u1, u2, u3);
+        const u4 = await listen<string>("speak-sentence", (event) => {
+          const sentence =
+            typeof event.payload === "string"
+              ? event.payload
+              : (event.payload as any)?.sentence || String(event.payload ?? "");
+          if (sentence && sentence.trim()) {
+            speakRef.current(sentence.trim(), { enqueue: true });
+          }
+        });
+        unlisteners.push(u1, u2, u3, u4);
       } catch (err) {
         // Ignored outside Tauri
       }
     };
     setupListeners();
 
+    // Custom DOM event listener for browser dev mode and unit tests
+    const onCustomSpeakSentence = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      const sentence =
+        typeof detail === "string"
+          ? detail
+          : detail?.sentence || String(detail ?? "");
+      if (sentence && sentence.trim()) {
+        speakRef.current(sentence.trim(), { enqueue: true });
+      }
+    };
+    window.addEventListener("speak-sentence", onCustomSpeakSentence);
+
     return () => {
       unlisteners.forEach((u) => u());
+      window.removeEventListener("speak-sentence", onCustomSpeakSentence);
     };
   }, []);
 

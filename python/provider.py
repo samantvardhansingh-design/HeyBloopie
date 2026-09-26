@@ -170,6 +170,62 @@ async def generate_plan(prompt: str, options: Optional[dict] = None) -> str:
     return await provider.generate(prompt, options=options)
 
 
+# Module-level convenience function matching stream()
+generate = generate_plan
+
+
+async def stream(prompt: str, options: Optional[dict] = None) -> AsyncIterator[str]:
+    """Streams text chunks as an async generator as they arrive from the active provider.
+
+    Args:
+        prompt: Text prompt string.
+        options: Optional configuration overrides (e.g. model, temperature).
+
+    Yields:
+        Text chunks as they arrive from the LLM.
+    """
+    factory = ProviderFactory()
+
+    # If options contains a specific model, attempt to route to that model's provider
+    if options and options.get("model"):
+        chosen_model = options["model"]
+        try:
+            from python.model_registry import ModelRegistry
+            info = ModelRegistry().get_model_info(chosen_model)
+            if info and info.get("provider"):
+                provider_inst = factory.get_provider(info["provider"])
+                async for chunk in provider_inst.stream(prompt, options=options):
+                    yield chunk
+                return
+        except Exception as e:
+            logger.debug(f"Could not route specific model {chosen_model} via registry: {e}")
+
+    # Check active_provider preference from memory first
+    try:
+        from python import memory
+        active_prov = (memory.get_preference("active_provider") or "").lower().strip()
+        if active_prov:
+            provider_inst = factory.get_provider(active_prov)
+            if await provider_inst.is_available():
+                async for chunk in provider_inst.stream(prompt, options=options):
+                    yield chunk
+                return
+    except Exception as e:
+        logger.debug(f"Could not route to active_provider: {e}")
+
+    available = factory.list_available_providers()
+    if "gemini" in available:
+        provider_inst = factory.get_provider("gemini")
+    elif available:
+        provider_inst = factory.get_provider(available[0])
+    else:
+        from python.providers.gemini_adapter import GeminiAdapter
+        provider_inst = GeminiAdapter()
+
+    async for chunk in provider_inst.stream(prompt, options=options):
+        yield chunk
+
+
 PROVIDER_PREFIXES = {
     "gemini": ("AIzaSy", "AQ."),
     "openai": "sk-",

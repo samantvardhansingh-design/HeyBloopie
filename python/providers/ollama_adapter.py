@@ -69,10 +69,14 @@ class OllamaAdapter(AIProvider):
         """Generates a text response from Ollama via /api/generate."""
         try:
             model = (options or {}).get("model") or await self.get_effective_default_model()
+            payload = {"model": model, "prompt": prompt, "stream": False}
+            if options and options.get("max_tokens"):
+                payload["options"] = {"num_predict": options["max_tokens"]}
+
             async with httpx.AsyncClient(timeout=60.0) as client:
                 res = await client.post(
                     f"{self.base_url}/api/generate",
-                    json={"model": model, "prompt": prompt, "stream": False},
+                    json=payload,
                 )
                 res.raise_for_status()
                 data = res.json()
@@ -85,11 +89,15 @@ class OllamaAdapter(AIProvider):
         """Streams text chunks from Ollama via /api/generate stream=True."""
         try:
             model = (options or {}).get("model") or await self.get_effective_default_model()
+            payload = {"model": model, "prompt": prompt, "stream": True}
+            if options and options.get("max_tokens"):
+                payload["options"] = {"num_predict": options["max_tokens"]}
+
             async with httpx.AsyncClient(timeout=60.0) as client:
                 async with client.stream(
                     "POST",
                     f"{self.base_url}/api/generate",
-                    json={"model": model, "prompt": prompt, "stream": True},
+                    json=payload,
                 ) as stream_resp:
                     stream_resp.raise_for_status()
                     async for line in stream_resp.aiter_lines():

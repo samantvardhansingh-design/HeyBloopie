@@ -119,8 +119,10 @@ export const Overlay: React.FC<OverlayProps> = ({ onClose, onOpenSettings, onRun
         setReport(result);
         setIsWorking(false);
 
-        // Speak summary only (never speak full file lists)
-        if (!isMuted && result.summary) {
+        // Speak summary for file execution tasks (streaming TTS handles conversational responses)
+        const isConversational =
+          result.total_steps === 0 && (!result.details || result.details.length === 0);
+        if (!isMuted && result.summary && !isConversational) {
           speak(result.summary);
         }
       } catch (err: any) {

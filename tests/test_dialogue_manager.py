@@ -161,3 +161,25 @@ async def test_json_formatted_llm_responses(mock_memory, mock_provider_factory, 
     mock_provider.generate.return_value = '{"intent": "OTHER_COMMAND"}'
     res3 = await dm.process("play spotify")
     assert "I can't do that yet" in res3
+
+
+def test_reduced_prompt_size(mock_memory, mock_provider_factory):
+    """Verifies that the prompt size is minimized (<60 words) to speed up time-to-first-token."""
+    dm = DialogueManager(memory=mock_memory, provider_factory=mock_provider_factory)
+    prompt = dm._build_prompt("who are you")
+    word_count = len(prompt.split())
+    # Prior prompt was >170 words. Optimized prompt must be under 60 words.
+    assert word_count < 60, f"Prompt is too long ({word_count} words). Expected < 60 words."
+
+
+@pytest.mark.asyncio
+async def test_max_tokens_passed_to_provider(mock_memory, mock_provider_factory, mock_provider):
+    """Verifies that max_tokens parameter is passed in options to the provider."""
+    mock_provider.generate.return_value = "Hello!"
+    dm = DialogueManager(memory=mock_memory, provider_factory=mock_provider_factory)
+    await dm.process("hello", max_tokens=120)
+
+    mock_provider.generate.assert_awaited_once()
+    kwargs = mock_provider.generate.call_args[1]
+    assert kwargs.get("options") == {"max_tokens": 120}
+

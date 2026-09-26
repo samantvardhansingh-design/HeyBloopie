@@ -96,37 +96,24 @@ class DialogueManager:
         return None
 
     def _build_prompt(self, user_input: str) -> str:
-        """Builds the comprehensive classification and dialogue prompt for the LLM.
+        """Builds a minimal, low-latency prompt for the LLM to minimize time-to-first-token.
 
         Args:
             user_input: The current user message.
 
         Returns:
-            The complete prompt text formatted with system persona, history, and classification schema.
+            A concise prompt formatted with persona, recent context, and classification schema.
         """
-        history_lines: List[str] = []
-        for turn in self.history:
-            role = str(turn.get("role", "user")).capitalize()
-            content = turn.get("content", "")
-            history_lines.append(f"{role}: {content}")
-
-        history_str = "\n".join(history_lines) if history_lines else "(No prior conversation)"
+        # Limit history context in prompt to last 4 turns to keep prompt small and fast
+        recent = self.history[-4:] if self.history else []
+        history_lines = [f"{t.get('role', 'user')}: {t.get('content', '')}" for t in recent]
+        history_str = "\n".join(history_lines)
+        history_part = f"\nHistory:\n{history_str}\n" if history_str else "\n"
 
         return (
-            f"System Prompt:\n{self.SYSTEM_PROMPT}\n\n"
-            f"Full Conversation History:\n{history_str}\n\n"
-            f"Current User Input:\n{user_input}\n\n"
-            "Task and Instructions:\n"
-            "1. Classify the user's intent into exactly one of three categories:\n"
-            "   - 'CONVERSATION': Small talk, greetings, questions about your identity, personality, or capabilities, general pleasantries.\n"
-            "   - 'FILE_COMMAND': Finding, organizing, moving, deleting, renaming, searching, or managing files and folders.\n"
-            "   - 'OTHER_COMMAND': Requests to perform tasks outside desktop file management (e.g., sending emails, browsing the web, checking weather, playing music).\n\n"
-            "2. Generate your response based on the classified intent:\n"
-            f"   - If 'FILE_COMMAND': Respond with ONLY the exact token: {self.FILE_COMMAND_TOKEN}\n"
-            "   - If 'CONVERSATION': Provide a direct, calm, professional, and helpful response to the user. Never sound like a robot.\n"
-            "   - If 'OTHER_COMMAND': Provide a conversational response explaining your limitations (e.g., \"I can't do that yet, but I'm learning. I'm currently focused on file management.\").\n\n"
-            "Output Format:\n"
-            f"Return either the direct conversational response, '{self.FILE_COMMAND_TOKEN}' for file commands, or a JSON object with 'intent' and 'response' fields."
+            f"{self.SYSTEM_PROMPT}{history_part}"
+            f"User: {user_input}\n"
+            f"Intent: CONVERSATION (reply concisely in 1-2 sentences), FILE_COMMAND (respond '{self.FILE_COMMAND_TOKEN}'), or OTHER_COMMAND (explain limit)."
         )
 
     def _parse_response(self, raw_text: str) -> str:
@@ -238,24 +225,24 @@ class DialogueManager:
             return True
         return False
 
-    async def process(self, user_input: str) -> str:
+    DEFAULT_CONVERSATIONAL_MAX_TOKENS = 120
+
+    async def process(self, user_input: str, max_tokens: int = DEFAULT_CONVERSATIONAL_MAX_TOKENS) -> str:
         """Processes user input through conversational context and intent classification.
 
         Steps:
             1. Appends user input to the short-term conversation history.
             2. Trims history to the last `max_turns` entries.
-            3. Constructs prompt with HeyBloopie personality, history, and classification instructions.
-            4. Calls the LLM via provider.
-            5. Evaluates intent:
-               - FILE_COMMAND -> returns FILE_COMMAND_TOKEN.
-               - CONVERSATION -> returns direct conversational response.
-               - OTHER_COMMAND -> returns limitation explanation.
+            3. Constructs concise prompt with HeyBloopie personality and context.
+            4. Calls the LLM via provider with max_tokens limit.
+            5. Evaluates intent and parses response.
             6. Appends the assistant's response to the conversation history.
             7. Trims history to the last `max_turns` entries.
             8. Returns the final response string.
 
         Args:
             user_input: Natural language string from the user.
+            max_tokens: Maximum tokens for conversational output (default 120, between 100-150).
 
         Returns:
             Assistant response string or FILE_COMMAND_TOKEN.
@@ -273,7 +260,8 @@ class DialogueManager:
         response: Optional[str] = None
         if provider is not None:
             try:
-                raw_response = await provider.generate(prompt)
+                options = {"max_tokens": max_tokens}
+                raw_response = await provider.generate(prompt, options=options)
                 if self._is_provider_error(raw_response):
                     logger.warning(f"AIProvider returned error message: {raw_response}")
                     response = None

@@ -21,15 +21,77 @@ from dataclasses import dataclass
 import inspect
 import json
 import logging
+import re
 import time
 from typing import Any, Callable, Dict, List, Optional
 
-from python import dialogue_manager, memory, model_router, planner, policy, tools
+from python import dialogue_manager, memory, model_router, planner, policy, provider, tools, triage_router
 
 logger = logging.getLogger("heybloopie.core")
 
 _active_wake_word_listener = None
 _active_dialogue_manager: Optional[dialogue_manager.DialogueManager] = None
+_event_listeners: Dict[str, List[Callable[[Any], None]]] = {}
+
+
+def add_event_listener(event: str, callback: Callable[[Any], None]) -> None:
+    """Adds a listener callback for core events (primarily for testing)."""
+    if event not in _event_listeners:
+        _event_listeners[event] = []
+    _event_listeners[event].append(callback)
+
+
+def remove_event_listener(event: str, callback: Callable[[Any], None]) -> None:
+    """Removes a listener callback."""
+    if event in _event_listeners and callback in _event_listeners[event]:
+        _event_listeners[event].remove(callback)
+
+
+def clear_event_listeners() -> None:
+    """Clears all event listeners."""
+    _event_listeners.clear()
+
+
+def emit(event: str, payload: Any) -> None:
+    """Sends an event to the frontend via stdout and in-memory listeners."""
+    try:
+        data = json.dumps({"event": event, "payload": payload})
+        print(f"__TAURI_EVENT__{data}", flush=True)
+    except Exception as e:
+        logger.debug(f"Failed to serialize event {event}: {e}")
+
+    for cb in _event_listeners.get(event, []):
+        try:
+            cb(payload)
+        except Exception as e:
+            logger.debug(f"Error in event listener for {event}: {e}")
+
+
+def extract_sentences(buffer: str) -> tuple[List[str], str]:
+    """Extracts completed sentences from the buffer.
+
+    A sentence is completed when punctuated by . ! or ? followed by whitespace or end of string.
+    Holds back incomplete sentences if more chunks may arrive.
+    """
+    pattern = re.compile(r'([^.!?]+[.!?]["\']?)(?:\s+|$)', re.DOTALL)
+    sentences: List[str] = []
+    last_end = 0
+
+    matches = list(pattern.finditer(buffer))
+    if not matches:
+        return [], buffer
+
+    for i, match in enumerate(matches):
+        # If the last match reaches the end of buffer without trailing whitespace,
+        # hold it back because more tokens could be streaming for this sentence
+        if i == len(matches) - 1 and match.end() == len(buffer) and not buffer.endswith((" ", "\n", "\t")):
+            break
+        s = match.group(1).strip()
+        if s:
+            sentences.append(s)
+        last_end = match.end()
+
+    return sentences, buffer[last_end:]
 
 
 def get_dialogue_manager() -> dialogue_manager.DialogueManager:
@@ -151,19 +213,87 @@ async def run(user_request: str) -> ExecutionReport:
     plan = None
 
     try:
-        # Step 0: Process through DialogueManager for conversational responses vs file commands
-        if hasattr(dialogue_manager, "process") and callable(getattr(dialogue_manager, "process")):
-            dialogue_resp = await dialogue_manager.process(user_request)
-        else:
-            dm = get_dialogue_manager()
-            dialogue_resp = await dm.process(user_request)
+        # Step 0: Fast Triage Router (keyword-based intent classification)
+        context = {
+            "history": memory.get_recent_tasks(limit=5) if hasattr(memory, "get_recent_tasks") else []
+        }
+        intent = await triage_router.route(user_request, context=context)
+        print(f"Triage Router classified intent: {intent}")
 
-        if dialogue_resp != dialogue_manager.FILE_COMMAND_TOKEN:
-            print(f"Conversational response from DialogueManager: {dialogue_resp}")
+        if intent == triage_router.INTENT_CONVERSATION:
+            print(f"Routing to conversational LLM pipeline for: {user_request}")
             duration_ms = int((time.time() - start_time) * 1000)
+
+            dm = get_dialogue_manager()
+            streamed_sentences: List[str] = []
+            full_response_text = ""
+
+            # Call stream() method to stream conversational chunks
+            stream_gen = None
+            if hasattr(provider, "stream") and callable(provider.stream):
+                try:
+                    prompt = user_request
+                    if hasattr(dm, "_build_prompt"):
+                        built = dm._build_prompt(user_request)
+                        if isinstance(built, str):
+                            prompt = built
+                    stream_gen = provider.stream(prompt, options={"max_tokens": 120})
+                except Exception as e:
+                    logger.debug(f"Failed to initialize stream(): {e}")
+                    stream_gen = None
+
+            if stream_gen is not None:
+                buffer = ""
+                try:
+                    async for chunk in stream_gen:
+                        if not chunk:
+                            continue
+                        if dialogue_manager.DialogueManager._is_provider_error(chunk):
+                            full_response_text = ""
+                            break
+                        buffer += chunk
+                        full_response_text += chunk
+                        completed, buffer = extract_sentences(buffer)
+                        for sent in completed:
+                            streamed_sentences.append(sent)
+                            emit("speak-sentence", sent)
+
+                    if full_response_text:
+                        remaining = buffer.strip()
+                        if remaining:
+                            streamed_sentences.append(remaining)
+                            emit("speak-sentence", remaining)
+                except Exception as e:
+                    logger.warning(f"Error during stream(): {e}")
+
+            # Fallback if streaming didn't produce valid chunks (e.g. provider error or mocked dm.process in unit tests)
+            if not full_response_text.strip() or dialogue_manager.DialogueManager._is_provider_error(full_response_text):
+                streamed_sentences.clear()
+                if hasattr(dialogue_manager, "process") and callable(getattr(dialogue_manager, "process")):
+                    dialogue_resp = await dialogue_manager.process(user_request, max_tokens=120)
+                else:
+                    dialogue_resp = await dm.process(user_request, max_tokens=120)
+                full_response_text = dialogue_resp
+                if dialogue_resp:
+                    completed, remaining = extract_sentences(dialogue_resp)
+                    for sent in completed:
+                        if sent not in streamed_sentences:
+                            streamed_sentences.append(sent)
+                            emit("speak-sentence", sent)
+                    if remaining.strip() and remaining.strip() not in streamed_sentences:
+                        streamed_sentences.append(remaining.strip())
+                        emit("speak-sentence", remaining.strip())
+            else:
+                # Update dialogue manager history
+                if hasattr(dm, "history"):
+                    dm.history.append({"role": "user", "content": user_request})
+                    dm.history.append({"role": "assistant", "content": full_response_text.strip()})
+                    if hasattr(dm, "_trim_history"):
+                        dm._trim_history()
+
             report = ExecutionReport(
                 success=True,
-                summary=dialogue_resp,
+                summary=full_response_text.strip() or "I am here to help you manage your files.",
                 details=[],
                 exceptions=[],
                 total_steps=0,
@@ -175,6 +305,37 @@ async def run(user_request: str) -> ExecutionReport:
             except Exception as e:
                 logger.debug(f"Failed to log conversational task to memory: {e}")
             print("=== Core Loop Finished (Conversational) ===")
+            return report
+
+        elif intent == triage_router.INTENT_OTHER:
+            print(f"Routing to generic 'I can't do that yet' response for: {user_request}")
+            logger.info(f"Feature request logged: {user_request}")
+            print(f"Feature request logged: {user_request}")
+            try:
+                memory.log_feature_request(user_request)
+            except Exception as e:
+                logger.debug(f"Failed to log feature request: {e}")
+
+            cannot_do_msg = "I can't do that yet. I'm currently focused on finding, organizing, renaming, and moving files."
+            emit("speak-sentence", cannot_do_msg)
+
+            report = ExecutionReport(
+                success=False,
+                summary=cannot_do_msg,
+                details=[],
+                exceptions=[],
+                total_steps=0,
+                steps_succeeded=0,
+                steps_failed=0,
+            )
+            duration_ms = int((time.time() - start_time) * 1000)
+            print("Logging task to memory...")
+            try:
+                memory.log_task(user_request, None, report, duration_ms)
+                print("Task logged successfully.")
+            except Exception as e:
+                logger.debug(f"Failed to log task to memory: {e}")
+            print("=== Core Loop Finished (Other) ===")
             return report
 
         # Step 1: Check for plan reuse if user request indicates reuse
