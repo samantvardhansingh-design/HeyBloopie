@@ -24,11 +24,31 @@ import logging
 import time
 from typing import Any, Callable, Dict, List, Optional
 
-from python import memory, model_router, planner, policy, tools
+from python import dialogue_manager, memory, model_router, planner, policy, tools
 
 logger = logging.getLogger("heybloopie.core")
 
 _active_wake_word_listener = None
+_active_dialogue_manager: Optional[dialogue_manager.DialogueManager] = None
+
+
+def get_dialogue_manager() -> dialogue_manager.DialogueManager:
+    """Returns or initializes the session DialogueManager singleton."""
+    global _active_dialogue_manager
+    if _active_dialogue_manager is None:
+        from python.provider import ProviderFactory
+
+        _active_dialogue_manager = dialogue_manager.DialogueManager(
+            memory=memory.get_memory(),
+            provider_factory=ProviderFactory,
+        )
+    return _active_dialogue_manager
+
+
+def set_dialogue_manager(dm: Optional[dialogue_manager.DialogueManager]) -> None:
+    """Sets or resets the active DialogueManager instance (useful for testing)."""
+    global _active_dialogue_manager
+    _active_dialogue_manager = dm
 
 # Available tools specification for V1
 AVAILABLE_TOOLS: List[Dict[str, Any]] = [
@@ -131,6 +151,32 @@ async def run(user_request: str) -> ExecutionReport:
     plan = None
 
     try:
+        # Step 0: Process through DialogueManager for conversational responses vs file commands
+        if hasattr(dialogue_manager, "process") and callable(getattr(dialogue_manager, "process")):
+            dialogue_resp = await dialogue_manager.process(user_request)
+        else:
+            dm = get_dialogue_manager()
+            dialogue_resp = await dm.process(user_request)
+
+        if dialogue_resp != dialogue_manager.FILE_COMMAND_TOKEN:
+            print(f"Conversational response from DialogueManager: {dialogue_resp}")
+            duration_ms = int((time.time() - start_time) * 1000)
+            report = ExecutionReport(
+                success=True,
+                summary=dialogue_resp,
+                details=[],
+                exceptions=[],
+                total_steps=0,
+                steps_succeeded=0,
+                steps_failed=0,
+            )
+            try:
+                memory.log_task(user_request, None, report, duration_ms)
+            except Exception as e:
+                logger.debug(f"Failed to log conversational task to memory: {e}")
+            print("=== Core Loop Finished (Conversational) ===")
+            return report
+
         # Step 1: Check for plan reuse if user request indicates reuse
         reuse_triggers = [
             "same as last time",

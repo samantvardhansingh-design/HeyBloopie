@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
+import { motion, AnimatePresence } from "framer-motion";
 import { useSpeechRecognition } from "../hooks/useSpeechRecognition";
 import { useSpeechSynthesis } from "../hooks/useSpeechSynthesis";
 import {
@@ -219,178 +220,230 @@ export const Overlay: React.FC<OverlayProps> = ({ onClose, onOpenSettings, onRun
     };
   }, [handleWakeWordTriggered, handleStopAndClose]);
 
-  if (!isVisible) {
-    return null;
-  }
-
   return (
-    <div className="hud-container" data-testid="overlay-container">
-      {/* HUD Header */}
-      <div className="hud-header">
-        <div className="hud-title">
-          <span
-            className="hud-status-dot"
-            style={{
-              background: isListening
-                ? "var(--accent-red)"
-                : isWorking
-                ? "var(--accent-amber)"
-                : "var(--accent-blue)",
-              boxShadow: isListening
-                ? "0 0 12px var(--accent-red)"
-                : isWorking
-                ? "0 0 12px var(--accent-amber)"
-                : "0 0 12px var(--accent-blue)",
-              animation: isListening
-                ? "statusGlowRed 1.5s infinite"
-                : isWorking
-                ? "statusGlowAmber 1.5s infinite"
-                : "statusGlowBlue 3s infinite",
-            }}
-          ></span>
-          HeyBloopie
-        </div>
-
-        <div className="hud-actions">
-          {/* Stop Button */}
-          <button
-            className="hud-btn-stop"
-            data-testid="stop-btn"
-            onClick={handleStopAndClose}
-            title="Stop speaking & close overlay"
-          >
-            <Square size={11} fill="currentColor" />
-            <span>Stop</span>
-          </button>
-
-          {/* Mute Toggle Button */}
-          <button
-            className="hud-btn-icon"
-            data-testid="mute-btn"
-            onClick={() => {
-              if (!isMuted && isSpeaking) {
-                stopSpeaking();
-              }
-              setIsMuted((prev) => !prev);
-            }}
-            title={isMuted ? "Unmute voice responses" : "Mute voice responses"}
-            aria-label={isMuted ? "Unmute voice responses" : "Mute voice responses"}
-          >
-            {isMuted ? <VolumeX size={15} /> : <Volume2 size={15} />}
-            <span style={{ display: "none" }}>{isMuted ? "🔇" : "🔊"}</span>
-          </button>
-
-          {/* Settings Button */}
-          {onOpenSettings && (
-            <button
-              className="hud-btn-icon"
-              data-testid="settings-btn"
-              onClick={onOpenSettings}
-              title="Open Settings"
-              aria-label="Open Settings"
-            >
-              <SettingsIcon size={15} />
-            </button>
-          )}
-
-          {/* Close Button */}
-          <button
-            className="hud-btn-icon"
-            data-testid="close-btn"
-            onClick={handleStopAndClose}
-            title="Close overlay (Esc)"
-            aria-label="Close overlay"
-          >
-            <X size={15} />
-          </button>
-        </div>
-      </div>
-
-      {/* HUD Body */}
-      <div className="hud-body">
-        {isWorking ? (
-          <div className="working-indicator" data-testid="working-indicator">
-            <div className="spinner"></div>
-            <span>Thinking & searching...</span>
-          </div>
-        ) : report ? (
-          <div className="report-card" data-testid="report-card">
-            <div className="report-summary" data-testid="report-summary">
-              {report.summary}
+    <AnimatePresence>
+      {isVisible && (
+        <motion.div
+          className="hud-container"
+          data-testid="overlay-container"
+          initial={{ opacity: 0, y: 50, scale: 0.96 }}
+          animate={{ opacity: 1, y: 0, scale: 1 }}
+          exit={{ opacity: 0, y: 40, scale: 0.96 }}
+          transition={{
+            type: "spring",
+            stiffness: 300,
+            damping: 26,
+            mass: 0.8,
+          }}
+        >
+          {/* HUD Header */}
+          <div className="hud-header">
+            <div className="hud-title">
+              {/* Animated Voice Visualizer (Replacing static dot) */}
+              <div
+                className="hud-visualizer"
+                data-testid="hud-visualizer"
+                title={
+                  isListening
+                    ? "Listening..."
+                    : isSpeaking
+                    ? "HeyBloopie speaking..."
+                    : isWorking
+                    ? "Thinking..."
+                    : "HeyBloopie ready"
+                }
+              >
+                {isListening ? (
+                  <div className="waveform-bars listening">
+                    <span className="bar bar-1"></span>
+                    <span className="bar bar-2"></span>
+                    <span className="bar bar-3"></span>
+                    <span className="bar bar-4"></span>
+                    <span className="bar bar-5"></span>
+                  </div>
+                ) : isSpeaking ? (
+                  <div className="waveform-bars speaking">
+                    <span className="s-wave wave-1"></span>
+                    <span className="s-wave wave-2"></span>
+                    <span className="s-wave wave-3"></span>
+                    <span className="s-wave wave-4"></span>
+                    <span className="s-wave wave-5"></span>
+                  </div>
+                ) : isWorking ? (
+                  <div className="hud-orb working"></div>
+                ) : (
+                  <div className="hud-orb idle"></div>
+                )}
+              </div>
+              HeyBloopie
             </div>
 
-            {/* Display details visually (e.g. file list) without speaking them */}
-            {report.details &&
-              report.details.map((detail, idx) => (
-                <div key={idx}>
-                  {Array.isArray(detail.data) && detail.data.length > 0 && (
-                    <div className="file-list">
-                      {detail.data.map((item: any, fIdx: number) => (
-                        <div key={fIdx} className="file-item">
-                          <div className="file-item-left">
-                            <FileText size={14} className="file-icon" />
-                            <span className="file-name">{item.name || item.path}</span>
-                          </div>
-                          {item.path && item.name && (
-                            <span className="file-path">{item.path}</span>
-                          )}
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                  {detail.warning && (
-                    <div className="report-warning">
-                      <AlertTriangle size={14} />
-                      <span>{detail.warning}</span>
-                    </div>
-                  )}
-                </div>
-              ))}
+            <div className="hud-actions">
+              {/* Stop Button */}
+              <button
+                className="hud-btn-stop"
+                data-testid="stop-btn"
+                onClick={handleStopAndClose}
+                title="Stop speaking & close overlay"
+              >
+                <Square size={11} fill="currentColor" />
+                <span>Stop</span>
+              </button>
+
+              {/* Mute Toggle Button */}
+              <button
+                className="hud-btn-icon"
+                data-testid="mute-btn"
+                onClick={() => {
+                  if (!isMuted && isSpeaking) {
+                    stopSpeaking();
+                  }
+                  setIsMuted((prev) => !prev);
+                }}
+                title={isMuted ? "Unmute voice responses" : "Mute voice responses"}
+                aria-label={isMuted ? "Unmute voice responses" : "Mute voice responses"}
+              >
+                {isMuted ? <VolumeX size={15} /> : <Volume2 size={15} />}
+                <span style={{ display: "none" }}>{isMuted ? "🔇" : "🔊"}</span>
+              </button>
+
+              {/* Settings Button */}
+              {onOpenSettings && (
+                <button
+                  className="hud-btn-icon"
+                  data-testid="settings-btn"
+                  onClick={onOpenSettings}
+                  title="Open Settings"
+                  aria-label="Open Settings"
+                >
+                  <SettingsIcon size={15} />
+                </button>
+              )}
+
+              {/* Close Button */}
+              <button
+                className="hud-btn-icon"
+                data-testid="close-btn"
+                onClick={handleStopAndClose}
+                title="Close overlay (Esc)"
+                aria-label="Close overlay"
+              >
+                <X size={15} />
+              </button>
+            </div>
           </div>
-        ) : (
-          <p className="hud-prompt-placeholder">
-            {isListening
-              ? "Listening... Speak your request."
-              : "Say 'Hey Bloopie' or type a command to manage your files..."}
-          </p>
-        )}
-      </div>
 
-      {/* HUD Input Bar */}
-      <form
-        className="hud-input-bar"
-        onSubmit={(e) => {
-          e.preventDefault();
-          executeRequest(inputText);
-        }}
-      >
-        <button
-          type="button"
-          className={`mic-button ${isListening ? "mic-pulsing" : ""}`}
-          data-testid="mic-btn"
-          onClick={handleMicClick}
-          title={isListening ? "Listening..." : "Click to speak"}
-          aria-label={isListening ? "Listening..." : "Click to speak"}
-        >
-          <Mic size={17} />
-        </button>
+          {/* HUD Body */}
+          <div className="hud-body">
+            {isWorking ? (
+              <div className="working-indicator" data-testid="working-indicator">
+                <div className="spinner"></div>
+                <span>Thinking & searching...</span>
+              </div>
+            ) : isListening ? (
+              <div className="listening-stage" data-testid="listening-stage">
+                <div className="siri-waveform">
+                  <span className="siri-bar b1"></span>
+                  <span className="siri-bar b2"></span>
+                  <span className="siri-bar b3"></span>
+                  <span className="siri-bar b4"></span>
+                  <span className="siri-bar b5"></span>
+                  <span className="siri-bar b6"></span>
+                  <span className="siri-bar b7"></span>
+                </div>
+                <p className="listening-caption">Listening... Speak your request.</p>
+              </div>
+            ) : report ? (
+              <div className="report-card" data-testid="report-card">
+                {isSpeaking && (
+                  <div className="speaking-badge">
+                    <Volume2 size={13} />
+                    <div className="speaking-mini-bars">
+                      <span className="smb smb-1"></span>
+                      <span className="smb smb-2"></span>
+                      <span className="smb smb-3"></span>
+                      <span className="smb smb-4"></span>
+                    </div>
+                    <span>HeyBloopie speaking...</span>
+                  </div>
+                )}
+                <div className="report-summary" data-testid="report-summary">
+                  {report.summary}
+                </div>
 
-        <input
-          type="text"
-          data-testid="query-input"
-          placeholder="e.g. Find all receipts from last month in Downloads"
-          value={inputText}
-          onChange={(e) => setInputText(e.target.value)}
-          autoFocus
-        />
+                {/* Display details visually (e.g. file list) without speaking them */}
+                {report.details &&
+                  report.details.map((detail, idx) => (
+                    <div key={idx}>
+                      {Array.isArray(detail.data) && detail.data.length > 0 && (
+                        <div className="file-list">
+                          {detail.data.map((item: any, fIdx: number) => (
+                            <div key={fIdx} className="file-item">
+                              <div className="file-item-left">
+                                <FileText size={14} className="file-icon" />
+                                <span className="file-name">{item.name || item.path}</span>
+                              </div>
+                              {item.path && item.name && (
+                                <span className="file-path">{item.path}</span>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      {detail.warning && (
+                        <div className="report-warning">
+                          <AlertTriangle size={14} />
+                          <span>{detail.warning}</span>
+                        </div>
+                      )}
+                    </div>
+                  ))}
+              </div>
+            ) : (
+              <p className="hud-prompt-placeholder">
+                Say 'Hey Bloopie' or type a command to manage your files...
+              </p>
+            )}
+          </div>
 
-        <button type="submit" className="hud-btn" data-testid="submit-btn">
-          <Sparkles size={14} />
-          <span>Ask</span>
-        </button>
-      </form>
-    </div>
+          {/* HUD Input Bar */}
+          <form
+            className="hud-input-bar"
+            onSubmit={(e) => {
+              e.preventDefault();
+              executeRequest(inputText);
+            }}
+          >
+            <button
+              type="button"
+              className={`mic-button ${isListening ? "mic-pulsing" : ""}`}
+              data-testid="mic-btn"
+              onClick={handleMicClick}
+              title={isListening ? "Listening..." : "Click to speak"}
+              aria-label={isListening ? "Listening..." : "Click to speak"}
+            >
+              <Mic size={17} />
+            </button>
+
+            <input
+              type="text"
+              data-testid="query-input"
+              placeholder="e.g. Find all receipts from last month in Downloads"
+              value={inputText}
+              onChange={(e) => setInputText(e.target.value)}
+              autoFocus
+            />
+
+            <button type="submit" className="hud-btn" data-testid="submit-btn">
+              <Sparkles size={14} />
+              <span>Ask</span>
+            </button>
+          </form>
+        </motion.div>
+      )}
+    </AnimatePresence>
   );
+
 };
 
 export default Overlay;

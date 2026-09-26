@@ -15,12 +15,13 @@ import ast
 import json
 import os
 import sys
+from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 # Ensure python directory is accessible
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from python import core, planner, policy, provider, tools
+from python import core, dialogue_manager, planner, policy, provider, tools
 
 
 @pytest.mark.asyncio
@@ -357,4 +358,64 @@ async def test_core_handles_user_denial_on_confirmation(monkeypatch):
     assert report.success is False
     assert report.summary == "Cancelled."
     assert report.steps_succeeded == 0
+
+
+@pytest.mark.asyncio
+async def test_conversational_query_does_not_trigger_planner(monkeypatch):
+    """TEST: A conversational query is handled directly by DialogueManager and does NOT trigger Planner or tools."""
+    mock_planner = AsyncMock(side_effect=AssertionError("Planner should NOT be called for conversational query!"))
+    monkeypatch.setattr(planner, "create_plan", mock_planner)
+
+    mock_dm = MagicMock()
+    conversational_text = "I am HeyBloopie, a professional, calm, and capable desktop executive."
+    mock_dm.process = AsyncMock(return_value=conversational_text)
+    monkeypatch.setattr(core, "get_dialogue_manager", lambda: mock_dm)
+
+    report = await core.run("who are you")
+
+    assert report.success is True
+    assert report.summary == conversational_text
+    assert report.total_steps == 0
+    assert report.steps_succeeded == 0
+    assert report.steps_failed == 0
+    assert len(report.details) == 0
+    mock_planner.assert_not_called()
+    mock_dm.process.assert_awaited_once_with("who are you")
+
+
+@pytest.mark.asyncio
+async def test_file_command_proceeds_to_planner(monkeypatch):
+    """TEST: A [FILE_COMMAND] response from DialogueManager proceeds to existing Planner and execution logic."""
+    step = planner.PlanStep(
+        tool_name="find_files",
+        params={"query": "report"},
+        risk_level="low",
+        description="Find files",
+    )
+    plan = planner.Plan(steps=[step], summary="Find report", requires_confirmation=False)
+
+    mock_planner = AsyncMock(return_value=plan)
+    monkeypatch.setattr(planner, "create_plan", mock_planner)
+
+    mock_dm = MagicMock()
+    mock_dm.process = AsyncMock(return_value="[FILE_COMMAND]")
+    monkeypatch.setattr(core, "get_dialogue_manager", lambda: mock_dm)
+
+    async def mock_find_files(**kwargs):
+        return tools.ToolResult(
+            success=True,
+            data=[{"name": "report.pdf", "path": "C:\\Users\\test\\report.pdf"}],
+            message="Found",
+            verified=True,
+            verification_details="",
+        )
+
+    monkeypatch.setitem(core.TOOL_DISPATCH, "find_files", mock_find_files)
+
+    report = await core.run("find my report")
+
+    assert report.success is True
+    assert report.steps_succeeded == 1
+    mock_planner.assert_called_once()
+    mock_dm.process.assert_awaited_once_with("find my report")
 
