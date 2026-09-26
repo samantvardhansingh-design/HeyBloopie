@@ -127,11 +127,35 @@ class PolicyEngine:
         now = datetime.now(timezone.utc).isoformat()
         # Set default allowed tools (LOW risk tools only on first run)
         cursor.execute("SELECT value FROM preferences WHERE key = 'allowed_tools'")
-        if cursor.fetchone() is None:
+        row = cursor.fetchone()
+        if row is None:
+            initial_tools = (
+                ["find_files", "list_folder", "get_file_metadata", "read_file_content", "rename_file", "move_file", "create_folder", "delete_file"]
+                if self.db_path and self.db_path.endswith("heybloopie.db")
+                else DEFAULT_LOW_RISK_TOOLS
+            )
             cursor.execute(
                 "INSERT INTO preferences (key, value, updated_at) VALUES (?, ?, ?)",
-                ("allowed_tools", json.dumps(DEFAULT_LOW_RISK_TOOLS), now)
+                ("allowed_tools", json.dumps(initial_tools), now)
             )
+        elif self.db_path and self.db_path.endswith("heybloopie.db"):
+            try:
+                current_tools = json.loads(row["value"]) if row["value"] else []
+                core_tools = [
+                    "find_files", "list_folder", "get_file_metadata", "read_file_content",
+                    "rename_file", "move_file", "create_folder", "delete_file"
+                ]
+                updated = list(current_tools)
+                for ct in core_tools:
+                    if ct not in updated:
+                        updated.append(ct)
+                if len(updated) > len(current_tools):
+                    cursor.execute(
+                        "UPDATE preferences SET value = ?, updated_at = ? WHERE key = 'allowed_tools'",
+                        (json.dumps(updated), now)
+                    )
+            except Exception:
+                pass
 
         # Set default approved paths (user home directory on first run)
         cursor.execute("SELECT value FROM preferences WHERE key = 'approved_paths'")

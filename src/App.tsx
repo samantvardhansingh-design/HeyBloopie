@@ -61,12 +61,14 @@ export const App: React.FC<AppProps> = ({ initialView, invokeFn }) => {
         const u1 = await listen("open_overlay", () => setView("overlay"));
         const u2 = await listen("open_settings", () => setView("settings"));
         const u3 = await listen("check_updates", () => checkForUpdates());
-        const u4 = await listen<string>("speak-sentence", (event) => {
+        const u4 = await listen<any>("speak-sentence", (event) => {
+          const payload = event.payload;
           const sentence =
-            typeof event.payload === "string"
-              ? event.payload
-              : (event.payload as any)?.sentence || String(event.payload ?? "");
+            typeof payload === "string"
+              ? payload
+              : payload?.text || payload?.sentence || String(payload ?? "");
           if (sentence && sentence.trim()) {
+            console.log("Received speak-sentence event:", sentence.trim());
             speakRef.current(sentence.trim(), { enqueue: true });
           }
         });
@@ -83,8 +85,9 @@ export const App: React.FC<AppProps> = ({ initialView, invokeFn }) => {
       const sentence =
         typeof detail === "string"
           ? detail
-          : detail?.sentence || String(detail ?? "");
+          : detail?.text || detail?.sentence || String(detail ?? "");
       if (sentence && sentence.trim()) {
+        console.log("Received custom speak-sentence event:", sentence.trim());
         speakRef.current(sentence.trim(), { enqueue: true });
       }
     };
@@ -103,6 +106,7 @@ export const App: React.FC<AppProps> = ({ initialView, invokeFn }) => {
   };
 
   const handleRunCore = async (userRequest: string) => {
+    console.log("Sending request to backend...", "run_core", { request: userRequest });
     return await callTauri("run_core", { request: userRequest });
   };
 

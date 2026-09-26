@@ -168,3 +168,97 @@ async def test_find_files_handles_unapproved_path(sandbox_env):
     assert result.success is False
     assert result.data is None
     assert "outside" in result.message.lower()
+
+
+@pytest.mark.asyncio
+async def test_rename_file_success(sandbox_env):
+    """TEST 8: rename_file renames a file and verifies on disk."""
+    temp_dir, policy = sandbox_env
+    policy.set_allowed_tools(policy.get_allowed_tools() + ["rename_file"])
+
+    old_file = os.path.join(temp_dir, "draft.txt")
+    with open(old_file, "w", encoding="utf-8") as f:
+        f.write("Draft content")
+
+    from python.tools import rename_file
+    result = await rename_file(old_path=old_file, new_name="final.txt", policy_engine=policy)
+
+    assert result.success is True
+    assert result.verified is True
+    new_file = os.path.join(temp_dir, "final.txt")
+    assert os.path.exists(new_file)
+    assert not os.path.exists(old_file)
+
+
+@pytest.mark.asyncio
+async def test_rename_file_respects_policy(sandbox_env):
+    """TEST 9: rename_file is denied if not in allowed_tools."""
+    temp_dir, policy = sandbox_env
+    # Do not add rename_file to allowed_tools
+
+    old_file = os.path.join(temp_dir, "doc.txt")
+    with open(old_file, "w", encoding="utf-8") as f:
+        f.write("content")
+
+    from python.tools import rename_file
+    result = await rename_file(old_path=old_file, new_name="new_doc.txt", policy_engine=policy)
+
+    assert result.success is False
+    assert "denied by policy" in result.message.lower()
+
+
+@pytest.mark.asyncio
+async def test_move_file_success(sandbox_env):
+    """TEST 10: move_file moves a file into destination folder and verifies on disk."""
+    temp_dir, policy = sandbox_env
+    policy.set_allowed_tools(policy.get_allowed_tools() + ["move_file"])
+
+    src_file = os.path.join(temp_dir, "to_move.txt")
+    with open(src_file, "w", encoding="utf-8") as f:
+        f.write("Move me")
+
+    dest_folder = os.path.join(temp_dir, "Archive")
+
+    from python.tools import move_file
+    result = await move_file(source_path=src_file, destination_path=dest_folder, policy_engine=policy)
+
+    assert result.success is True
+    assert result.verified is True
+    expected_dest = os.path.join(dest_folder, "to_move.txt")
+    assert os.path.exists(expected_dest)
+    assert not os.path.exists(src_file)
+
+
+@pytest.mark.asyncio
+async def test_create_folder_success(sandbox_env):
+    """TEST 11: create_folder creates a directory and verifies on disk."""
+    temp_dir, policy = sandbox_env
+    policy.set_allowed_tools(policy.get_allowed_tools() + ["create_folder"])
+
+    new_dir = os.path.join(temp_dir, "Projects", "HeyBloopie")
+
+    from python.tools import create_folder
+    result = await create_folder(folder_path=new_dir, policy_engine=policy)
+
+    assert result.success is True
+    assert result.verified is True
+    assert os.path.isdir(new_dir)
+
+
+@pytest.mark.asyncio
+async def test_list_folder_success(sandbox_env):
+    """TEST 12: list_folder lists visible entries in a folder."""
+    temp_dir, policy = sandbox_env
+    policy.set_allowed_tools(policy.get_allowed_tools() + ["list_folder"])
+
+    with open(os.path.join(temp_dir, "file1.txt"), "w") as f:
+        f.write("a")
+    with open(os.path.join(temp_dir, "file2.txt"), "w") as f:
+        f.write("b")
+
+    from python.tools import list_folder
+    result = await list_folder(path=temp_dir, policy_engine=policy)
+
+    assert result.success is True
+    assert "file1.txt" in result.data
+    assert "file2.txt" in result.data

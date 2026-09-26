@@ -88,6 +88,10 @@ FILE_ACTIONS = {
     "extract",
     "archive",
     "duplicate",
+    "create",
+    "make",
+    "mkdir",
+    "new",
 }
 
 # File command target indicators
@@ -253,28 +257,19 @@ async def classify_with_model(user_input: str, model: Optional[str] = None) -> O
     return None
 
 
-async def route(user_input: str, context: Optional[Dict[str, Any]] = None, use_model: bool = False) -> str:
-    """Classifies user intent into CONVERSATION, FILE_COMMAND, or OTHER.
+async def route_intent(user_input: str) -> str:
+    """Classifies user intent into CONVERSATION, FILE_COMMAND, or OTHER using a fast keyword heuristic.
 
-    Uses a two-tier approach:
-    1. Instant heuristic check for common phrases, greetings, file actions, and targets (0ms).
-    2. Fallback to fastest, cheapest model (Gemini Flash-Lite, 20 tokens) if explicitly requested
-       or if heuristics are indeterminate.
-
-    Args:
-        user_input: The raw natural language input string.
-        context: Optional dictionary containing session history, preferences, or metadata.
-        use_model: Whether to invoke the fast triage model for classification.
-
-    Returns:
-        One of 'CONVERSATION', 'FILE_COMMAND', or 'OTHER'.
+    - If the input contains greetings, "who are you", "what can you do", "hello", etc., return "CONVERSATION".
+    - If the input contains "find", "organize", "move", "rename", "delete", return "FILE_COMMAND".
+    - Otherwise, return "OTHER".
     """
     if not user_input or not user_input.strip():
         return INTENT_CONVERSATION
 
     clean = user_input.lower().strip()
 
-    # 1. Check plan reuse triggers first (e.g. "same as last time", "do it again")
+    # 1. Plan reuse triggers (always file commands)
     for trigger in REUSE_TRIGGERS:
         if trigger in clean:
             return INTENT_FILE_COMMAND
@@ -284,57 +279,90 @@ async def route(user_input: str, context: Optional[Dict[str, Any]] = None, use_m
         if re.search(pat, clean):
             return INTENT_CONVERSATION
 
-    # 3. Tokenize words with regex (stripping punctuation)
+    # 3. Tokenize words with regex
     words = re.findall(r"\b\w+\b", clean)
     word_set = set(words)
 
-    # 4. Check explicit non-file keywords (email, weather, music, alarms, etc.)
-    if word_set & NON_FILE_KEYWORDS:
-        # If user explicitly asked about files (e.g. "email_attachment.pdf" or "file"), let file logic take precedence
-        has_file_target = bool(word_set & FILE_TARGETS) or bool(re.search(r"\.[a-zA-Z0-9]{2,4}\b", clean))
-        if not has_file_target:
-            return INTENT_OTHER
-
-    # 5. Check conversational keywords
-    for kw in CONVERSATION_KEYWORDS:
-        if kw in clean:
-            # If the user also explicitly asked to find/delete/organize files, prioritize file command
+    # 4. Conversational phrases and greetings
+    conversational_phrases = [
+        "who are you",
+        "what are you",
+        "what is your name",
+        "whats your name",
+        "your name",
+        "what can you do",
+        "what are your capabilities",
+        "how can you help",
+        "help me",
+        "tell me about yourself",
+        "how are you",
+        "tell me a joke",
+        "are you an ai",
+        "are you a robot",
+        "are you a bot",
+    ]
+    for phrase in conversational_phrases:
+        if phrase in clean:
+            # Prioritize file commands if user explicitly requested file action + target
             has_action = bool(word_set & FILE_ACTIONS)
-            has_target = bool(word_set & FILE_TARGETS)
+            has_target = bool(word_set & FILE_TARGETS) or bool(re.search(r"\.[a-zA-Z0-9]{2,4}\b", clean))
             if has_action and has_target:
                 return INTENT_FILE_COMMAND
             return INTENT_CONVERSATION
 
-    # 6. Check File Command criteria:
+    # Common greetings
+    greetings = {"hello", "hi", "hey", "howdy", "sup", "greetings", "good morning", "good afternoon", "good evening", "thank you", "thanks", "bye", "goodbye"}
+    if clean in greetings or any(clean.startswith(g + " ") for g in greetings) or any(clean.endswith(" " + g) for g in greetings):
+        if not (word_set & {"find", "organize", "move", "rename", "delete"}):
+            return INTENT_CONVERSATION
+
+    # 5. Non-file domains (email, music, weather, alarms, etc.) -> OTHER
+    if word_set & NON_FILE_KEYWORDS:
+        has_file_target = bool(word_set & FILE_TARGETS) or bool(re.search(r"\.[a-zA-Z0-9]{2,4}\b", clean))
+        if not has_file_target:
+            return INTENT_OTHER
+
+    # 6. Core file command action keywords requested: find, organize, move, rename, delete
+    core_actions = {"find", "organize", "move", "rename", "delete", "search", "locate", "remove", "trash", "cleanup"}
+    if word_set & core_actions:
+        return INTENT_FILE_COMMAND
+
+    # 6b. Creation commands: create/make/mkdir/new with folder/directory/file
+    creation_actions = {"create", "make", "mkdir", "new"}
+    if (word_set & creation_actions) and (
+        bool(word_set & {"folder", "folders", "directory", "directories", "dir", "file", "files"})
+        or bool(re.search(r"\.[a-zA-Z0-9]{2,4}\b", clean))
+    ):
+        return INTENT_FILE_COMMAND
+
+    # 7. Additional file actions + targets check
     has_action = bool(word_set & FILE_ACTIONS)
     has_target = bool(word_set & FILE_TARGETS) or bool(re.search(r"\.[a-zA-Z0-9]{2,4}\b", clean))
     has_folder_target = any(
         folder in clean
-        for folder in ["downloads", "desktop", "documents", "pictures", "videos", "music folder"]
+        for folder in ["in downloads", "in desktop", "in documents", "from downloads", "from desktop"]
     )
-
     if has_action and (has_target or has_folder_target):
-        return INTENT_FILE_COMMAND
-
-    # If starts with strong search/find/delete/move/organize:
-    if words and words[0] in {"find", "search", "locate", "delete", "remove", "organize", "cleanup"}:
         return INTENT_FILE_COMMAND
 
     # If targets common system folder names with in/from
     if any(folder in clean for folder in ["in downloads", "in desktop", "in documents", "from downloads", "from desktop"]):
         return INTENT_FILE_COMMAND
 
-    # 7. Check single-word greetings / pleasantries
-    if clean in {"hi", "hello", "hey", "sup", "howdy", "thanks", "bye"}:
-        return INTENT_CONVERSATION
+    return INTENT_OTHER
 
-    # 8. If requested or for ambiguous inputs, use the fastest triage model (Gemini Flash-Lite)
+
+async def route(
+    user_input: str,
+    context: Optional[Dict[str, Any]] = None,
+    use_model: bool = False,
+) -> str:
+    """Backward-compatible entry point calling route_intent or optional model triage."""
     if use_model:
         model_result = await classify_with_model(user_input)
         if model_result:
             return model_result
+    return await route_intent(user_input)
 
-    # 9. Otherwise, it is an unsupported task outside desktop file management
-    return INTENT_OTHER
 
 

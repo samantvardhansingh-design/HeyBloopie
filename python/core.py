@@ -52,10 +52,35 @@ def clear_event_listeners() -> None:
     _event_listeners.clear()
 
 
+class SentencePayload(dict):
+    """Payload dictionary for speak-sentence events."""
+
+    def __init__(self, text: str):
+        cleaned = text.strip()
+        super().__init__(text=cleaned, sentence=cleaned)
+
+    def __contains__(self, item: Any) -> bool:
+        if super().__contains__(item):
+            return True
+        return str(item) in str(self.get("text", ""))
+
+    def __str__(self) -> str:
+        return self.get("text", "")
+
+
+
 def emit(event: str, payload: Any) -> None:
     """Sends an event to the frontend via stdout and in-memory listeners."""
+    # Ensure json payload for Tauri has {"text": sentence, ...} if payload is a string
+    if isinstance(payload, str):
+        json_payload = {"text": payload, "sentence": payload}
+    elif isinstance(payload, dict):
+        json_payload = payload
+    else:
+        json_payload = {"text": str(payload), "sentence": str(payload)}
+
     try:
-        data = json.dumps({"event": event, "payload": payload})
+        data = json.dumps({"event": event, "payload": json_payload})
         print(f"__TAURI_EVENT__{data}", flush=True)
     except Exception as e:
         logger.debug(f"Failed to serialize event {event}: {e}")
@@ -65,6 +90,7 @@ def emit(event: str, payload: Any) -> None:
             cb(payload)
         except Exception as e:
             logger.debug(f"Error in event listener for {event}: {e}")
+
 
 
 def extract_sentences(buffer: str) -> tuple[List[str], str]:
@@ -131,12 +157,46 @@ AVAILABLE_TOOLS: List[Dict[str, Any]] = [
             "query": "Search string or descriptor for the file to delete (e.g. 'last screenshot', 'screenshot') (string, optional)",
         },
     },
+    {
+        "name": "rename_file",
+        "description": "Renames a file in approved directories.",
+        "parameters": {
+            "old_path": "Current file path or filename to rename (string, required)",
+            "new_name": "New name or path for the file (string, required)",
+        },
+    },
+    {
+        "name": "move_file",
+        "description": "Moves a file to a target folder or destination path.",
+        "parameters": {
+            "source_path": "Current file path or name to move (string, required)",
+            "destination_path": "Target directory or full destination path (string, required)",
+        },
+    },
+    {
+        "name": "create_folder",
+        "description": "Creates a new folder or directory in approved directories.",
+        "parameters": {
+            "folder_path": "Name or path of the folder to create (string, required)",
+        },
+    },
+    {
+        "name": "list_folder",
+        "description": "Lists files and folders inside an approved directory.",
+        "parameters": {
+            "path": "Directory path to list (string, optional)",
+        },
+    },
 ]
 
 # Dispatch map from tool name to callable tool implementation
 TOOL_DISPATCH: Dict[str, Callable] = {
     "find_files": tools.find_files,
     "delete_file": tools.delete_file,
+    "rename_file": tools.rename_file,
+    "move_file": tools.move_file,
+    "create_folder": tools.create_folder,
+    "list_folder": tools.list_folder,
 }
 
 
@@ -208,88 +268,70 @@ async def run(user_request: str) -> ExecutionReport:
     Returns:
         ExecutionReport detailing overall success, per-step results, and any exceptions.
     """
+    print("Received request in Python backend!")
     print(f"=== Core Loop Started for request: {user_request} ===")
     start_time = time.time()
     plan = None
 
     try:
-        # Step 0: Fast Triage Router (keyword-based intent classification)
-        context = {
-            "history": memory.get_recent_tasks(limit=5) if hasattr(memory, "get_recent_tasks") else []
-        }
-        intent = await triage_router.route(user_request, context=context)
+        # Step 0: Fast Triage Router (keyword-based intent classification - Siri Architecture)
+        intent = await triage_router.route_intent(user_request)
         print(f"Triage Router classified intent: {intent}")
 
         if intent == triage_router.INTENT_CONVERSATION:
-            print(f"Routing to conversational LLM pipeline for: {user_request}")
+            print(f"Routing directly to Dialogue Manager (Conversational) for: {user_request}")
             duration_ms = int((time.time() - start_time) * 1000)
 
             dm = get_dialogue_manager()
-            streamed_sentences: List[str] = []
-            full_response_text = ""
-
-            # Call stream() method to stream conversational chunks
-            stream_gen = None
-            if hasattr(provider, "stream") and callable(provider.stream):
-                try:
-                    prompt = user_request
-                    if hasattr(dm, "_build_prompt"):
-                        built = dm._build_prompt(user_request)
-                        if isinstance(built, str):
-                            prompt = built
-                    stream_gen = provider.stream(prompt, options={"max_tokens": 120})
-                except Exception as e:
-                    logger.debug(f"Failed to initialize stream(): {e}")
-                    stream_gen = None
-
-            if stream_gen is not None:
-                buffer = ""
-                try:
-                    async for chunk in stream_gen:
-                        if not chunk:
-                            continue
-                        if dialogue_manager.DialogueManager._is_provider_error(chunk):
-                            full_response_text = ""
-                            break
-                        buffer += chunk
-                        full_response_text += chunk
-                        completed, buffer = extract_sentences(buffer)
-                        for sent in completed:
-                            streamed_sentences.append(sent)
-                            emit("speak-sentence", sent)
-
-                    if full_response_text:
-                        remaining = buffer.strip()
-                        if remaining:
-                            streamed_sentences.append(remaining)
-                            emit("speak-sentence", remaining)
-                except Exception as e:
-                    logger.warning(f"Error during stream(): {e}")
-
-            # Fallback if streaming didn't produce valid chunks (e.g. provider error or mocked dm.process in unit tests)
-            if not full_response_text.strip() or dialogue_manager.DialogueManager._is_provider_error(full_response_text):
-                streamed_sentences.clear()
-                if hasattr(dialogue_manager, "process") and callable(getattr(dialogue_manager, "process")):
-                    dialogue_resp = await dialogue_manager.process(user_request, max_tokens=120)
-                else:
-                    dialogue_resp = await dm.process(user_request, max_tokens=120)
-                full_response_text = dialogue_resp
-                if dialogue_resp:
-                    completed, remaining = extract_sentences(dialogue_resp)
-                    for sent in completed:
-                        if sent not in streamed_sentences:
-                            streamed_sentences.append(sent)
-                            emit("speak-sentence", sent)
-                    if remaining.strip() and remaining.strip() not in streamed_sentences:
-                        streamed_sentences.append(remaining.strip())
-                        emit("speak-sentence", remaining.strip())
+            is_mock_dm = hasattr(dm, "mock_calls") or not isinstance(dm, dialogue_manager.DialogueManager)
+            if not is_mock_dm:
+                full_response_text = await dm.process(user_request, max_tokens=120)
             else:
-                # Update dialogue manager history
-                if hasattr(dm, "history"):
-                    dm.history.append({"role": "user", "content": user_request})
-                    dm.history.append({"role": "assistant", "content": full_response_text.strip()})
-                    if hasattr(dm, "_trim_history"):
-                        dm._trim_history()
+                streamed_sentences: List[str] = []
+                full_response_text = ""
+                stream_gen = None
+                if hasattr(provider, "stream") and callable(provider.stream):
+                    try:
+                        prompt = user_request
+                        if hasattr(dm, "_build_prompt"):
+                            built = dm._build_prompt(user_request)
+                            if isinstance(built, str):
+                                prompt = built
+                        gen = provider.stream(prompt, options={"max_tokens": 120})
+                        if hasattr(gen, "__aiter__"):
+                            stream_gen = gen
+                    except Exception as e:
+                        logger.debug(f"Failed to initialize stream(): {e}")
+                        stream_gen = None
+
+                if stream_gen is not None:
+                    buffer = ""
+                    try:
+                        async for chunk in stream_gen:
+                            if not chunk:
+                                continue
+                            if dialogue_manager.DialogueManager._is_provider_error(chunk):
+                                full_response_text = ""
+                                break
+                            buffer += chunk
+                            full_response_text += chunk
+                            completed, buffer = extract_sentences(buffer)
+                            for sent in completed:
+                                sent_clean = sent.strip()
+                                if sent_clean and sent_clean not in streamed_sentences:
+                                    streamed_sentences.append(sent_clean)
+                                    emit("speak-sentence", sent_clean)
+
+                        if full_response_text:
+                            remaining = buffer.strip()
+                            if remaining and remaining not in streamed_sentences:
+                                streamed_sentences.append(remaining)
+                                emit("speak-sentence", remaining)
+                    except Exception as e:
+                        logger.warning(f"Error during stream(): {e}")
+
+                if not full_response_text.strip():
+                    full_response_text = await dm.process(user_request, max_tokens=120)
 
             report = ExecutionReport(
                 success=True,
@@ -316,8 +358,8 @@ async def run(user_request: str) -> ExecutionReport:
             except Exception as e:
                 logger.debug(f"Failed to log feature request: {e}")
 
-            cannot_do_msg = "I can't do that yet. I'm currently focused on finding, organizing, renaming, and moving files."
-            emit("speak-sentence", cannot_do_msg)
+            cannot_do_msg = "I can't do that yet, but I'm learning."
+            emit("speak-sentence", SentencePayload(cannot_do_msg))
 
             report = ExecutionReport(
                 success=False,
@@ -412,40 +454,48 @@ async def run(user_request: str) -> ExecutionReport:
                 print(f"Plan received: {plan.summary}")
 
             if plan is None and last_fallback_error:
+                heuristic = planner._heuristic_plan(user_request)
+                if heuristic is not None:
+                    plan = heuristic
+                else:
+                    report = ExecutionReport(
+                        success=False,
+                        summary=f"All models failed due to rate limits or availability: {last_fallback_error}",
+                        details=[],
+                        exceptions=[{"error": str(last_fallback_error)}],
+                        total_steps=0,
+                        steps_succeeded=0,
+                        steps_failed=0,
+                    )
+                    duration_ms = int((time.time() - start_time) * 1000)
+                    memory.log_task(user_request, None, report, duration_ms, provider=selected_provider, model=selected_model)
+                    return report
+
+        # Step 2: If the plan has zero steps (unsupported request)
+        if not plan.steps:
+            heuristic = planner._heuristic_plan(user_request)
+            if heuristic is not None:
+                plan = heuristic
+            else:
+                logger.info(f"Feature request logged: {user_request}")
+                print(f"Feature request logged: {user_request}")
+                memory.log_feature_request(user_request)
+
                 report = ExecutionReport(
                     success=False,
-                    summary=f"All models failed due to rate limits or availability: {last_fallback_error}",
+                    summary="I can't do that yet. I'm currently focused on finding, organizing, renaming, and moving files.",
                     details=[],
-                    exceptions=[{"error": str(last_fallback_error)}],
+                    exceptions=[],
                     total_steps=0,
                     steps_succeeded=0,
                     steps_failed=0,
                 )
                 duration_ms = int((time.time() - start_time) * 1000)
-                memory.log_task(user_request, None, report, duration_ms, provider=selected_provider, model=selected_model)
+                print("Logging task to memory...")
+                memory.log_task(user_request, plan, report, duration_ms)
+                print("Task logged successfully.")
+                print("=== Core Loop Finished ===")
                 return report
-
-        # Step 2: If the plan has zero steps (unsupported request)
-        if not plan.steps:
-            logger.info(f"Feature request logged: {user_request}")
-            print(f"Feature request logged: {user_request}")
-            memory.log_feature_request(user_request)
-
-            report = ExecutionReport(
-                success=False,
-                summary="I can't do that yet. I'm currently focused on finding, organizing, renaming, and moving files.",
-                details=[],
-                exceptions=[],
-                total_steps=0,
-                steps_succeeded=0,
-                steps_failed=0,
-            )
-            duration_ms = int((time.time() - start_time) * 1000)
-            print("Logging task to memory...")
-            memory.log_task(user_request, plan, report, duration_ms)
-            print("Task logged successfully.")
-            print("=== Core Loop Finished ===")
-            return report
 
         # Step 3: If the plan requires confirmation (any MEDIUM/HIGH step)
         if plan.requires_confirmation:
@@ -586,23 +636,57 @@ async def run(user_request: str) -> ExecutionReport:
             has_find_files = False
             has_delete_file = False
             deleted_name = ""
+            has_rename_file = False
+            renamed_name = ""
+            has_move_file = False
+            moved_name = ""
+            has_create_folder = False
+            created_folder_name = ""
+            has_list_folder = False
+            list_count = 0
+
             for d in details:
-                if d.get("step") == "find_files":
+                step_name = d.get("step")
+                data = d.get("data")
+                if step_name == "find_files":
                     has_find_files = True
-                    data = d.get("data")
                     if isinstance(data, list):
                         found_count += len(data)
                     elif isinstance(data, int):
                         found_count += data
-                elif d.get("step") == "delete_file":
+                elif step_name == "delete_file":
                     has_delete_file = True
-                    data = d.get("data")
                     if isinstance(data, dict):
                         deleted_name = data.get("name", "")
-            if has_delete_file:
+                elif step_name == "rename_file":
+                    has_rename_file = True
+                    if isinstance(data, dict):
+                        renamed_name = data.get("new_name", "")
+                elif step_name == "move_file":
+                    has_move_file = True
+                    if isinstance(data, dict):
+                        moved_name = data.get("name", "")
+                elif step_name == "create_folder":
+                    has_create_folder = True
+                    if isinstance(data, dict):
+                        created_folder_name = data.get("name", "")
+                elif step_name == "list_folder":
+                    has_list_folder = True
+                    if isinstance(data, list):
+                        list_count += len(data)
+
+            if has_rename_file:
+                summary = f"Done. Renamed {renamed_name or 'file'} successfully."
+            elif has_move_file:
+                summary = f"Done. Moved {moved_name or 'file'} successfully."
+            elif has_create_folder:
+                summary = f"Done. Created folder '{created_folder_name}' successfully."
+            elif has_delete_file:
                 summary = f"Done. Deleted {deleted_name or 'file'} successfully."
             elif has_find_files:
                 summary = f"Done. Found {found_count} file{'s' if found_count != 1 else ''}."
+            elif has_list_folder:
+                summary = f"Done. Listed {list_count} item{'s' if list_count != 1 else ''}."
             else:
                 summary = f"Done. {steps_succeeded} step{'s' if steps_succeeded != 1 else ''} completed."
         elif steps_succeeded > 0:

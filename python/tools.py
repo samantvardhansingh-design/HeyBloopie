@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 import logging
 import os
+import shutil
 from typing import Any, Callable, Dict, List, Optional
 
 from python.policy import PolicyEngine, PolicyResult
@@ -143,6 +144,99 @@ def _sync_find_files(
     return results
 
 
+def _find_candidate_file(
+    query_or_path: Optional[str],
+    path_hint: Optional[str] = None,
+    policy: Optional[PolicyEngine] = None,
+) -> Optional[str]:
+    """Resolves a target file path from an exact path or by searching approved directories."""
+    if not query_or_path:
+        return None
+
+    clean_str = query_or_path.strip().strip("'\"")
+
+    # If it is an existing file path, return canonical realpath
+    if os.path.isfile(clean_str):
+        return os.path.realpath(clean_str)
+
+    # Gather candidate directories to search
+    candidate_dirs: List[str] = []
+    if path_hint and os.path.isdir(path_hint):
+        candidate_dirs.append(os.path.realpath(path_hint))
+
+    home = os.path.expanduser("~")
+    common_dirs = [
+        os.path.join(home, "Desktop"),
+        os.path.join(home, "Downloads"),
+        os.path.join(home, "Documents"),
+        os.path.join(home, "OneDrive", "Desktop"),
+        os.path.join(home, "OneDrive", "Documents"),
+        os.path.join(home, "OneDrive", "Pictures", "Screenshots"),
+        os.path.join(home, "Pictures", "Screenshots"),
+    ]
+    for d in common_dirs:
+        if os.path.isdir(d):
+            c_real = os.path.realpath(d)
+            if c_real not in candidate_dirs:
+                candidate_dirs.append(c_real)
+
+    if policy is not None:
+        try:
+            for p in policy.get_approved_paths():
+                c_real = os.path.realpath(p)
+                if c_real not in candidate_dirs:
+                    candidate_dirs.append(c_real)
+        except Exception:
+            pass
+
+    target_name_lower = os.path.basename(clean_str).lower()
+
+    # Pass 1: exact filename match in top-level of candidate directories
+    for c_dir in candidate_dirs:
+        if not os.path.isdir(c_dir):
+            continue
+        try:
+            for fname in os.listdir(c_dir):
+                if fname.startswith(".") or fname.startswith("$"):
+                    continue
+                if fname.lower() == target_name_lower:
+                    full_p = os.path.join(c_dir, fname)
+                    if os.path.isfile(full_p):
+                        return full_p
+        except OSError:
+            continue
+
+    # Pass 2: substring match or screenshot extension match
+    matches: List[tuple[float, str]] = []
+    for c_dir in candidate_dirs:
+        if not os.path.isdir(c_dir):
+            continue
+        try:
+            for fname in os.listdir(c_dir):
+                if fname.startswith(".") or fname.startswith("$"):
+                    continue
+                full_p = os.path.join(c_dir, fname)
+                if not os.path.isfile(full_p):
+                    continue
+                if target_name_lower in fname.lower() or (
+                    "screenshot" in target_name_lower
+                    and any(fname.lower().endswith(ext) for ext in [".png", ".jpg", ".jpeg"])
+                ):
+                    try:
+                        stat = os.stat(full_p)
+                        matches.append((stat.st_mtime, full_p))
+                    except OSError:
+                        pass
+        except OSError:
+            continue
+
+    if matches:
+        matches.sort(key=lambda x: x[0], reverse=True)
+        return matches[0][1]
+
+    return None
+
+
 async def find_files(
     query: str,
     date_range: Optional[str] = None,
@@ -150,18 +244,7 @@ async def find_files(
     policy_engine: Optional[PolicyEngine] = None,
     _post_search_hook: Optional[Callable[[List[Dict[str, Any]]], None]] = None,
 ) -> ToolResult:
-    """Finds files matching a name or content query within approved directories.
-
-    Args:
-        query: Search string for filename or content match.
-        date_range: Optional filter ('today', 'yesterday', 'last_week', 'last_month', 'last_year').
-        path: Optional specific directory to search within (must be in approved directories).
-        policy_engine: Optional policy engine instance (defaults to standard instance).
-        _post_search_hook: Optional test hook called between search and verification.
-
-    Returns:
-        ToolResult with found files, verification status, and details.
-    """
+    """Finds files matching a name or content query within approved directories."""
     try:
         policy = policy_engine or PolicyEngine()
 
@@ -241,16 +324,7 @@ async def delete_file(
     query: Optional[str] = None,
     policy_engine: Optional[PolicyEngine] = None,
 ) -> ToolResult:
-    """Deletes a file safely within approved directories after policy checks.
-
-    Args:
-        path: Direct file path, or directory containing the file.
-        query: Optional filename match query (e.g. 'screenshot') to find target file if path is a directory or None.
-        policy_engine: Optional policy engine instance.
-
-    Returns:
-        ToolResult with deletion status, deleted file path, and verification.
-    """
+    """Deletes a file safely within approved directories after policy checks."""
     try:
         policy = policy_engine or PolicyEngine()
         target_path = None
@@ -261,46 +335,11 @@ async def delete_file(
 
         # Case 2: path is a directory or None, or file doesn't exist -> search for the file
         if not target_path:
-            candidate_dirs = []
-            if path and os.path.isdir(path):
-                candidate_dirs.append(os.path.realpath(path))
-            else:
-                home = os.path.expanduser("~")
-                known_screen_dirs = [
-                    os.path.join(home, "OneDrive", "Pictures", "Screenshots"),
-                    os.path.join(home, "Pictures", "Screenshots"),
-                    os.path.join(home, "Downloads"),
-                    os.path.join(home, "Desktop"),
-                ]
-                for kd in known_screen_dirs:
-                    if os.path.isdir(kd):
-                        candidate_dirs.append(kd)
-                candidate_dirs.extend(policy.get_approved_paths())
-
-            matches = []
-            search_query = (query or "screenshot").lower()
-            for c_dir in candidate_dirs:
-                if not os.path.isdir(c_dir):
-                    continue
-                try:
-                    for fname in os.listdir(c_dir):
-                        if fname.startswith(".") or fname.startswith("$"):
-                            continue
-                        f_full = os.path.join(c_dir, fname)
-                        if not os.path.isfile(f_full):
-                            continue
-                        if search_query in fname.lower() or ("screenshot" in search_query and any(ext in fname.lower() for ext in [".png", ".jpg", ".jpeg"])):
-                            try:
-                                stat = os.stat(f_full)
-                                matches.append((stat.st_mtime, f_full, fname))
-                            except OSError:
-                                pass
-                except OSError:
-                    continue
-
-            if matches:
-                matches.sort(key=lambda x: x[0], reverse=True)
-                target_path = matches[0][1]
+            target_path = _find_candidate_file(
+                query or path or "screenshot",
+                path_hint=path if path and os.path.isdir(path) else None,
+                policy=policy,
+            )
 
         if not target_path or not os.path.exists(target_path):
             return ToolResult(
@@ -346,4 +385,408 @@ async def delete_file(
             verified=False,
             verification_details="Deletion operation threw an exception.",
         )
+
+
+async def rename_file(
+    old_path: Optional[str] = None,
+    new_name_or_path: Optional[str] = None,
+    new_name: Optional[str] = None,
+    source_path: Optional[str] = None,
+    destination_path: Optional[str] = None,
+    path: Optional[str] = None,
+    target_path: Optional[str] = None,
+    query: Optional[str] = None,
+    policy_engine: Optional[PolicyEngine] = None,
+) -> ToolResult:
+    """Renames a file safely within approved directories after policy checks.
+
+    Args:
+        old_path: Original file path or filename to rename.
+        new_name_or_path: New filename or target destination path.
+        new_name: Alternative parameter for new filename.
+        source_path: Alternative parameter for original file path.
+        destination_path: Alternative parameter for destination path.
+        path: Generic path parameter.
+        target_path: Alternative target path parameter.
+        query: Search string to locate file if path is not specified.
+        policy_engine: Optional PolicyEngine instance.
+
+    Returns:
+        ToolResult with rename outcome, paths, and disk verification.
+    """
+    try:
+        policy = policy_engine or PolicyEngine()
+        raw_source = old_path or source_path or target_path or path or query
+        if not raw_source:
+            return ToolResult(
+                success=False,
+                data=None,
+                message="No source file specified to rename.",
+                verified=False,
+                verification_details="Missing source path parameter.",
+            )
+
+        resolved_source = _find_candidate_file(raw_source, policy=policy)
+        if not resolved_source or not os.path.exists(resolved_source):
+            return ToolResult(
+                success=False,
+                data=None,
+                message=f"No matching file found to rename: '{raw_source}'.",
+                verified=False,
+                verification_details="Target source file does not exist.",
+            )
+
+        raw_dest = new_name or new_name_or_path or destination_path
+        if not raw_dest:
+            return ToolResult(
+                success=False,
+                data=None,
+                message="No new name or destination specified for rename.",
+                verified=False,
+                verification_details="Missing new_name parameter.",
+            )
+
+        clean_dest = raw_dest.strip().strip("'\"")
+        if os.path.isabs(clean_dest):
+            dest_path = os.path.realpath(clean_dest)
+        else:
+            # Place in the same parent directory as the source file
+            dest_path = os.path.realpath(os.path.join(os.path.dirname(resolved_source), clean_dest))
+
+        # Policy check before any mutation
+        policy_params = {
+            "source_path": resolved_source,
+            "destination_path": dest_path,
+            "target_path": resolved_source,
+            "path": resolved_source,
+            "new_name": os.path.basename(dest_path),
+        }
+        policy_decision = policy.check_action("rename_file", policy_params)
+        if not policy_decision.allowed:
+            return ToolResult(
+                success=False,
+                data=None,
+                message=f"Action denied by policy: {policy_decision.reason}",
+                verified=False,
+                verification_details="Rename operation denied by security policy.",
+            )
+
+        dest_dir = os.path.dirname(dest_path)
+        if dest_dir and not os.path.exists(dest_dir):
+            os.makedirs(dest_dir, exist_ok=True)
+
+        # Execute rename on worker thread
+        await asyncio.to_thread(os.rename, resolved_source, dest_path)
+
+        # Verify on disk
+        is_renamed = os.path.exists(dest_path) and (
+            resolved_source == dest_path or not os.path.exists(resolved_source)
+        )
+        old_name = os.path.basename(resolved_source)
+        new_name_val = os.path.basename(dest_path)
+
+        return ToolResult(
+            success=is_renamed,
+            data={
+                "old_path": resolved_source,
+                "new_path": dest_path,
+                "old_name": old_name,
+                "new_name": new_name_val,
+            },
+            message=f"Successfully renamed '{old_name}' to '{new_name_val}'.",
+            verified=is_renamed,
+            verification_details=f"Verified file exists at '{dest_path}'." if is_renamed else "File could not be verified on disk.",
+        )
+
+    except Exception as err:
+        logger.error(f"rename_file failed with exception: {err}")
+        return ToolResult(
+            success=False,
+            data=None,
+            message=f"Rename operation failed: {err}",
+            verified=False,
+            verification_details="Rename operation threw an exception.",
+        )
+
+
+async def move_file(
+    source_path: Optional[str] = None,
+    destination_path: Optional[str] = None,
+    path: Optional[str] = None,
+    target_path: Optional[str] = None,
+    destination_folder: Optional[str] = None,
+    query: Optional[str] = None,
+    policy_engine: Optional[PolicyEngine] = None,
+) -> ToolResult:
+    """Moves a file safely to a target folder or destination path.
+
+    Args:
+        source_path: Path or filename of the file to move.
+        destination_path: Target directory or full destination path.
+        path: Generic path parameter for source.
+        target_path: Alternative parameter for source.
+        destination_folder: Alternative parameter for target folder.
+        query: Search string to locate file if not direct path.
+        policy_engine: Optional PolicyEngine instance.
+
+    Returns:
+        ToolResult with move status, paths, and disk verification.
+    """
+    try:
+        policy = policy_engine or PolicyEngine()
+        raw_source = source_path or target_path or path or query
+        if not raw_source:
+            return ToolResult(
+                success=False,
+                data=None,
+                message="No source file specified to move.",
+                verified=False,
+                verification_details="Missing source path parameter.",
+            )
+
+        resolved_source = _find_candidate_file(raw_source, policy=policy)
+        if not resolved_source or not os.path.exists(resolved_source):
+            return ToolResult(
+                success=False,
+                data=None,
+                message=f"No matching file found to move: '{raw_source}'.",
+                verified=False,
+                verification_details="Target source file does not exist.",
+            )
+
+        raw_dest = destination_path or destination_folder
+        if not raw_dest:
+            return ToolResult(
+                success=False,
+                data=None,
+                message="No destination path specified to move file.",
+                verified=False,
+                verification_details="Missing destination parameter.",
+            )
+
+        clean_dest = raw_dest.strip().strip("'\"")
+        home = os.path.expanduser("~")
+
+        # Resolve destination
+        if os.path.isabs(clean_dest):
+            _, dest_ext = os.path.splitext(clean_dest)
+            if os.path.isdir(clean_dest) or clean_dest.endswith(("/", "\\")) or not dest_ext:
+                dest_path = os.path.join(clean_dest, os.path.basename(resolved_source))
+            else:
+                dest_path = clean_dest
+        else:
+            # Check standard folders (e.g. Documents, Downloads, Desktop)
+            matched_dir = None
+            for candidate in [
+                os.path.join(home, clean_dest),
+                os.path.join(home, "Documents", clean_dest),
+                os.path.join(home, "Desktop", clean_dest),
+            ]:
+                if os.path.isdir(candidate):
+                    matched_dir = candidate
+                    break
+
+            if matched_dir:
+                dest_path = os.path.join(matched_dir, os.path.basename(resolved_source))
+            else:
+                approved = policy.get_approved_paths()
+                base_dir = approved[0] if approved else home
+                dest_path = os.path.join(base_dir, clean_dest)
+                _, dest_ext = os.path.splitext(dest_path)
+                if not dest_ext:
+                    dest_path = os.path.join(dest_path, os.path.basename(resolved_source))
+
+        dest_path = os.path.realpath(dest_path)
+
+        # Policy check
+        policy_params = {
+            "source_path": resolved_source,
+            "destination_path": dest_path,
+            "path": resolved_source,
+        }
+        policy_decision = policy.check_action("move_file", policy_params)
+        if not policy_decision.allowed:
+            return ToolResult(
+                success=False,
+                data=None,
+                message=f"Action denied by policy: {policy_decision.reason}",
+                verified=False,
+                verification_details="Move operation denied by security policy.",
+            )
+
+        dest_dir = os.path.dirname(dest_path)
+        if dest_dir and not os.path.exists(dest_dir):
+            os.makedirs(dest_dir, exist_ok=True)
+
+        # Execute move on threadpool
+        await asyncio.to_thread(shutil.move, resolved_source, dest_path)
+
+        # Disk verification
+        is_moved = os.path.exists(dest_path) and not os.path.exists(resolved_source)
+        src_name = os.path.basename(resolved_source)
+
+        return ToolResult(
+            success=is_moved,
+            data={
+                "source_path": resolved_source,
+                "destination_path": dest_path,
+                "name": src_name,
+            },
+            message=f"Successfully moved '{src_name}' to '{dest_path}'.",
+            verified=is_moved,
+            verification_details=f"Verified file exists at '{dest_path}'." if is_moved else "Move verification failed on disk.",
+        )
+
+    except Exception as err:
+        logger.error(f"move_file failed with exception: {err}")
+        return ToolResult(
+            success=False,
+            data=None,
+            message=f"Move operation failed: {err}",
+            verified=False,
+            verification_details="Move operation threw an exception.",
+        )
+
+
+async def create_folder(
+    folder_path: Optional[str] = None,
+    path: Optional[str] = None,
+    name: Optional[str] = None,
+    parent_dir: Optional[str] = None,
+    policy_engine: Optional[PolicyEngine] = None,
+) -> ToolResult:
+    """Creates a new directory safely within approved directories after policy checks.
+
+    Args:
+        folder_path: Name or full path of folder to create.
+        path: Alternative parameter for folder path.
+        name: Alternative parameter for folder name.
+        parent_dir: Optional parent directory if only name is given.
+        policy_engine: Optional PolicyEngine instance.
+
+    Returns:
+        ToolResult with folder path and disk verification.
+    """
+    try:
+        policy = policy_engine or PolicyEngine()
+        raw_target = folder_path or path or name
+        if not raw_target:
+            return ToolResult(
+                success=False,
+                data=None,
+                message="No folder path or name specified to create.",
+                verified=False,
+                verification_details="Missing folder parameter.",
+            )
+
+        clean_target = raw_target.strip().strip("'\"")
+        home = os.path.expanduser("~")
+
+        if os.path.isabs(clean_target):
+            target_dir = os.path.realpath(clean_target)
+        else:
+            base_dir = parent_dir or (
+                policy.get_approved_paths()[0] if policy.get_approved_paths() else home
+            )
+            target_dir = os.path.realpath(os.path.join(base_dir, clean_target))
+
+        # Policy check
+        policy_params = {"folder_path": target_dir, "path": target_dir}
+        policy_decision = policy.check_action("create_folder", policy_params)
+        if not policy_decision.allowed:
+            return ToolResult(
+                success=False,
+                data=None,
+                message=f"Action denied by policy: {policy_decision.reason}",
+                verified=False,
+                verification_details="Folder creation denied by security policy.",
+            )
+
+        await asyncio.to_thread(os.makedirs, target_dir, exist_ok=True)
+        is_created = os.path.isdir(target_dir)
+        folder_name = os.path.basename(target_dir)
+
+        return ToolResult(
+            success=is_created,
+            data={"folder_path": target_dir, "name": folder_name},
+            message=f"Successfully created folder '{folder_name}'.",
+            verified=is_created,
+            verification_details=f"Verified directory exists at '{target_dir}'." if is_created else "Directory creation could not be verified.",
+        )
+
+    except Exception as err:
+        logger.error(f"create_folder failed with exception: {err}")
+        return ToolResult(
+            success=False,
+            data=None,
+            message=f"Folder creation failed: {err}",
+            verified=False,
+            verification_details="Folder creation threw an exception.",
+        )
+
+
+async def list_folder(
+    path: Optional[str] = None,
+    directory: Optional[str] = None,
+    policy_engine: Optional[PolicyEngine] = None,
+) -> ToolResult:
+    """Lists files and directories inside an approved directory.
+
+    Args:
+        path: Path to list.
+        directory: Alternative path parameter.
+        policy_engine: Optional PolicyEngine instance.
+
+    Returns:
+        ToolResult with list of entries and disk verification.
+    """
+    try:
+        policy = policy_engine or PolicyEngine()
+        raw_dir = path or directory
+        if raw_dir:
+            target_dir = os.path.realpath(raw_dir.strip().strip("'\""))
+        else:
+            approved = policy.get_approved_paths()
+            target_dir = approved[0] if approved else os.path.expanduser("~")
+
+        if not os.path.isdir(target_dir):
+            return ToolResult(
+                success=False,
+                data=None,
+                message=f"Directory does not exist: '{target_dir}'.",
+                verified=False,
+                verification_details="Target directory does not exist.",
+            )
+
+        policy_decision = policy.check_action("list_folder", {"path": target_dir, "directory": target_dir})
+        if not policy_decision.allowed:
+            return ToolResult(
+                success=False,
+                data=None,
+                message=f"Action denied by policy: {policy_decision.reason}",
+                verified=False,
+                verification_details="Listing denied by security policy.",
+            )
+
+        entries = await asyncio.to_thread(os.listdir, target_dir)
+        visible_entries = [e for e in entries if not e.startswith(".") and not e.startswith("$")]
+
+        return ToolResult(
+            success=True,
+            data=visible_entries,
+            message=f"Found {len(visible_entries)} items in '{os.path.basename(target_dir)}'.",
+            verified=True,
+            verification_details=f"Listed {len(visible_entries)} items successfully.",
+        )
+
+    except Exception as err:
+        logger.error(f"list_folder failed with exception: {err}")
+        return ToolResult(
+            success=False,
+            data=None,
+            message=f"Listing failed: {err}",
+            verified=False,
+            verification_details="Listing threw an exception.",
+        )
+
 

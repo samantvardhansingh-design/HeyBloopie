@@ -40,37 +40,65 @@ export async function safeInvoke<T = any>(
     }
   }
 
-  // 2. Web Browser Environment (Chrome, Edge at http://localhost:5173)
+  // 2. Web Browser Environment (Chrome, Edge at http://localhost:5173 or direct browser)
   if (
     typeof window !== "undefined" &&
     window.location &&
     window.location.origin &&
     window.location.origin.startsWith("http")
   ) {
-    const res = await fetch(`${window.location.origin}/api/tauri`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ cmd, args: args || {} }),
-    });
+    try {
+      const res = await fetch(`${window.location.origin}/api/tauri`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ cmd, args: args || {} }),
+      });
 
-    if (res.ok) {
-      const data = await res.json();
-      if (data && Array.isArray(data.events)) {
-        for (const ev of data.events) {
-          if (ev && ev.event) {
-            window.dispatchEvent(
-              new CustomEvent(ev.event, { detail: ev.payload })
-            );
+      if (res.ok) {
+        const data = await res.json();
+        if (data && Array.isArray(data.events)) {
+          for (const ev of data.events) {
+            if (ev && ev.event) {
+              window.dispatchEvent(
+                new CustomEvent(ev.event, { detail: ev.payload })
+              );
+            }
           }
         }
+        if (data && data.error) {
+          throw new Error(data.error);
+        }
+        return data ? (data.result as T) : (null as any);
       }
-      if (data && data.error) {
-        throw new Error(data.error);
-      }
-      return data ? (data.result as T) : (null as any);
-    } else {
-      const errText = await res.text();
-      throw new Error(errText || `Server returned ${res.status}`);
+    } catch (viteBridgeErr: any) {
+      // Fallback: If Vite dev middleware is unavailable, try direct Python backend on port 8000
+      try {
+        const res2 = await fetch(`http://127.0.0.1:8000/api/tauri`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ cmd, args: args || {} }),
+        });
+        if (res2.ok) {
+          const data2 = await res2.json();
+          if (data2 && Array.isArray(data2.events)) {
+            for (const ev of data2.events) {
+              if (ev && ev.event) {
+                window.dispatchEvent(
+                  new CustomEvent(ev.event, { detail: ev.payload })
+                );
+              }
+            }
+          }
+          if (data2 && data2.error) {
+            throw new Error(data2.error);
+          }
+          return data2 ? (data2.result as T) : (null as any);
+        }
+      } catch {}
+
+      throw new Error(
+        `Failed to reach backend via ${window.location.origin}/api/tauri or http://127.0.0.1:8000: ${viteBridgeErr?.message || viteBridgeErr}`
+      );
     }
   }
 

@@ -117,6 +117,145 @@ def _parse_json_response(raw_text: str) -> Optional[dict]:
     return None
 
 
+def _heuristic_plan(user_request: str) -> Optional[Plan]:
+    """Deterministic fallback planner for direct, unambiguous file operations.
+
+    Ensures core operations (rename, move, create folder, delete, find) succeed
+    even when LLM quota is exhausted, offline, or rate limited.
+    """
+    if not user_request:
+        return None
+
+    req = user_request.strip()
+
+    # 1. Rename: e.g. "rename test.txt to sample.txt", "rename file foo.png to bar.png", "change name of X to Y"
+    m_rename = re.search(
+        r"^(?:please\s+)?(?:rename|change\s+(?:the\s+)?name\s+of)\s+(?:the\s+)?(?:file\s+)?['\"]?([^'\"<>]+?)['\"]?\s+to\s+['\"]?([^'\"<>]+?)['\"]?\s*[.!?]?$",
+        req,
+        re.IGNORECASE,
+    )
+    if m_rename:
+        src = m_rename.group(1).strip()
+        dst = m_rename.group(2).strip()
+        step = PlanStep(
+            tool_name="rename_file",
+            params={"old_path": src, "new_name": dst},
+            risk_level="medium",
+            description=f"Rename '{src}' to '{dst}'",
+        )
+        return Plan(
+            steps=[step],
+            summary=f"Rename '{src}' to '{dst}'",
+            requires_confirmation=True,
+        )
+
+    # 2. Move: e.g. "move test.txt to Documents", "move file notes.txt to Archive"
+    m_move = re.search(
+        r"^(?:please\s+)?move\s+(?:the\s+)?(?:file\s+)?['\"]?([^'\"<>]+?)['\"]?\s+to\s+(?:folder\s+|directory\s+)?['\"]?([^'\"<>]+?)['\"]?\s*[.!?]?$",
+        req,
+        re.IGNORECASE,
+    )
+    if m_move:
+        src = m_move.group(1).strip()
+        dst = m_move.group(2).strip()
+        step = PlanStep(
+            tool_name="move_file",
+            params={"source_path": src, "destination_path": dst},
+            risk_level="medium",
+            description=f"Move '{src}' to '{dst}'",
+        )
+        return Plan(
+            steps=[step],
+            summary=f"Move '{src}' to '{dst}'",
+            requires_confirmation=True,
+        )
+
+    # 3. Create folder: e.g. "create folder Invoices", "create a new directory called Archive", "make folder Projects"
+    m_folder = re.search(
+        r"^(?:please\s+)?(?:create|make|new)\s+(?:a\s+)?(?:new\s+)?(?:folder|directory)(?:\s+(?:called|named))?\s+['\"]?([^'\"<>]+?)['\"]?\s*[.!?]?$",
+        req,
+        re.IGNORECASE,
+    )
+    if m_folder:
+        folder = m_folder.group(1).strip()
+        step = PlanStep(
+            tool_name="create_folder",
+            params={"folder_path": folder},
+            risk_level="medium",
+            description=f"Create folder '{folder}'",
+        )
+        return Plan(
+            steps=[step],
+            summary=f"Create folder '{folder}'",
+            requires_confirmation=True,
+        )
+
+    # 4. Delete: e.g. "delete test.txt", "delete last screenshot", "remove file old.log"
+    m_del = re.search(
+        r"^(?:please\s+)?(?:delete|remove)\s+(?:the\s+)?(?:file\s+)?['\"]?([^'\"<>]+?)['\"]?\s*[.!?]?$",
+        req,
+        re.IGNORECASE,
+    )
+    if m_del:
+        target = m_del.group(1).strip()
+        if target.lower() not in ("it", "this", "that", "everything", "all"):
+            step = PlanStep(
+                tool_name="delete_file",
+                params={"query": target},
+                risk_level="high",
+                description=f"Delete '{target}'",
+            )
+            return Plan(
+                steps=[step],
+                summary=f"Delete '{target}'",
+                requires_confirmation=True,
+            )
+
+    # 5. Find / Search: e.g. "find report.pdf", "find files matching report", "search for receipts"
+    m_find = re.search(
+        r"^(?:please\s+)?(?:find|search\s+for|look\s+for)\s+(?:the\s+)?(?:files?\s+)?(?:matching\s+|named\s+|called\s+)?['\"]?([^'\"<>]+?)['\"]?\s*[.!?]?$",
+        req,
+        re.IGNORECASE,
+    )
+    if m_find:
+        q = m_find.group(1).strip()
+        if q.lower() not in ("it", "them", "file", "files"):
+            step = PlanStep(
+                tool_name="find_files",
+                params={"query": q},
+                risk_level="low",
+                description=f"Find files matching '{q}'",
+            )
+            return Plan(
+                steps=[step],
+                summary=f"Find files matching '{q}'",
+                requires_confirmation=False,
+            )
+
+    # 6. List folder: e.g. "list files in Documents", "list folder Downloads"
+    m_list = re.search(
+        r"^(?:please\s+)?(?:list|show)(?:\s+(?:all\s+)?files\s+in|\s+folder|\s+directory)?\s+['\"]?([^'\"<>]+?)['\"]?\s*[.!?]?$",
+        req,
+        re.IGNORECASE,
+    )
+    if m_list:
+        folder = m_list.group(1).strip()
+        if folder.lower() not in ("files", "folders"):
+            step = PlanStep(
+                tool_name="list_folder",
+                params={"path": folder},
+                risk_level="low",
+                description=f"List contents of '{folder}'",
+            )
+            return Plan(
+                steps=[step],
+                summary=f"List contents of '{folder}'",
+                requires_confirmation=False,
+            )
+
+    return None
+
+
 async def create_plan(
     user_request: str,
     available_tools: Optional[list] = None,
@@ -167,6 +306,9 @@ async def create_plan(
         parsed = _parse_json_response(raw_response)
     except Exception as e:
         if _is_fallback_error(e):
+            heuristic = _heuristic_plan(user_request)
+            if heuristic is not None:
+                return heuristic
             raise
         logger.warning(f"Initial plan generation or parsing failed: {e}")
         parsed = None
@@ -182,12 +324,19 @@ async def create_plan(
             parsed = _parse_json_response(raw_response)
         except Exception as e:
             if _is_fallback_error(e):
+                heuristic = _heuristic_plan(user_request)
+                if heuristic is not None:
+                    return heuristic
                 raise
             logger.warning(f"Retry plan generation or parsing failed: {e}")
             parsed = None
 
-    # If it fails again, return empty Plan with standard fallback summary
+    # If it fails again, check heuristic before returning empty Plan
     if parsed is None:
+        heuristic = _heuristic_plan(user_request)
+        if heuristic is not None:
+            logger.info(f"Using heuristic plan for: {user_request}")
+            return heuristic
         logger.warning("Planner error: LLM returned invalid JSON or error. Returning empty plan.")
         print("Planner error: LLM returned invalid JSON or error. Returning empty plan.")
         return Plan(

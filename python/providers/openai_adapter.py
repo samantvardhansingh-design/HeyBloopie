@@ -48,7 +48,7 @@ class OpenAIAdapter(AIProvider):
             return "Error: OpenAI API key is not configured in keyring."
 
         try:
-            client = AsyncOpenAI(api_key=key)
+            client = AsyncOpenAI(api_key=key, max_retries=0, timeout=3.0)
             model_id = (options or {}).get("model") or self.default_model
             max_tokens = (options or {}).get("max_tokens")
 
@@ -75,7 +75,7 @@ class OpenAIAdapter(AIProvider):
             return
 
         try:
-            client = AsyncOpenAI(api_key=key)
+            client = AsyncOpenAI(api_key=key, max_retries=0, timeout=3.0)
             model_id = (options or {}).get("model") or self.default_model
             max_tokens = (options or {}).get("max_tokens")
 

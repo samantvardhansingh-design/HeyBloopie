@@ -456,3 +456,107 @@ async def test_conversational_streaming_emits_sentences(monkeypatch):
     finally:
         core.clear_event_listeners()
 
+
+@pytest.mark.asyncio
+async def test_core_executes_rename_file(monkeypatch, tmp_path):
+    """Verifies that Core executes rename_file plan successfully and reports summary."""
+    approved_dir = str(tmp_path)
+    old_file = os.path.join(approved_dir, "draft.txt")
+    with open(old_file, "w") as f:
+        f.write("content")
+
+    pol = policy.PolicyEngine()
+    pol.set_approved_paths([approved_dir])
+    pol.set_allowed_tools(["find_files", "rename_file", "delete_file"])
+    monkeypatch.setattr(policy, "get_policy_engine", lambda: pol)
+    monkeypatch.setattr(policy, "check_action", pol.check_action)
+    monkeypatch.setattr(policy, "request_permission", pol.request_permission)
+    monkeypatch.setattr(core, "show_preview", lambda p: True)
+
+    plan = planner.Plan(
+        steps=[
+            planner.PlanStep(
+                tool_name="rename_file",
+                params={"old_path": old_file, "new_name": "final.txt"},
+                risk_level="medium",
+                description="Rename draft.txt to final.txt",
+            )
+        ],
+        summary="Rename draft.txt to final.txt",
+        requires_confirmation=True,
+    )
+    monkeypatch.setattr(planner, "create_plan", AsyncMock(return_value=plan))
+
+    report = await core.run("rename draft.txt to final.txt")
+    assert report.success is True
+    assert "Renamed final.txt successfully" in report.summary
+    assert os.path.exists(os.path.join(approved_dir, "final.txt"))
+    assert not os.path.exists(old_file)
+
+
+@pytest.mark.asyncio
+async def test_core_executes_move_file(monkeypatch, tmp_path):
+    """Verifies that Core executes move_file plan successfully and reports summary."""
+    approved_dir = str(tmp_path)
+    src_file = os.path.join(approved_dir, "file_to_move.txt")
+    with open(src_file, "w") as f:
+        f.write("moving")
+    dest_dir = os.path.join(approved_dir, "Archive")
+
+    pol = policy.PolicyEngine()
+    pol.set_approved_paths([approved_dir])
+    pol.set_allowed_tools(["find_files", "move_file", "delete_file"])
+    monkeypatch.setattr(policy, "get_policy_engine", lambda: pol)
+    monkeypatch.setattr(policy, "check_action", pol.check_action)
+    monkeypatch.setattr(policy, "request_permission", pol.request_permission)
+    monkeypatch.setattr(core, "show_preview", lambda p: True)
+
+    plan = planner.Plan(
+        steps=[
+            planner.PlanStep(
+                tool_name="move_file",
+                params={"source_path": src_file, "destination_path": dest_dir},
+                risk_level="medium",
+                description="Move file_to_move.txt to Archive",
+            )
+        ],
+        summary="Move file_to_move.txt to Archive",
+        requires_confirmation=True,
+    )
+    monkeypatch.setattr(planner, "create_plan", AsyncMock(return_value=plan))
+
+    report = await core.run("move file_to_move.txt to Archive")
+    assert report.success is True
+    assert "Moved file_to_move.txt successfully" in report.summary
+    assert os.path.exists(os.path.join(dest_dir, "file_to_move.txt"))
+
+
+@pytest.mark.asyncio
+async def test_core_deterministic_heuristic_fallback(monkeypatch, tmp_path):
+    """Verifies that Core falls back to heuristic planner and executes when LLM throws rate limit."""
+    approved_dir = str(tmp_path)
+    old_file = os.path.join(approved_dir, "note.txt")
+    with open(old_file, "w") as f:
+        f.write("test")
+
+    pol = policy.PolicyEngine()
+    pol.set_approved_paths([approved_dir])
+    pol.set_allowed_tools(["rename_file", "find_files"])
+    monkeypatch.setattr(policy, "get_policy_engine", lambda: pol)
+    monkeypatch.setattr(policy, "check_action", pol.check_action)
+    monkeypatch.setattr(policy, "request_permission", pol.request_permission)
+    monkeypatch.setattr(core, "show_preview", lambda p: True)
+
+    # Simulate provider throwing 429 quota exhaustion
+    async def mock_generate_plan(prompt, options=None):
+        raise Exception("429 Too Many Requests: Insufficient quota")
+
+    monkeypatch.setattr(provider, "generate_plan", mock_generate_plan)
+
+    report = await core.run(f"rename {old_file} to renamed_note.txt")
+    assert report.success is True
+    assert "Renamed renamed_note.txt successfully" in report.summary
+    assert os.path.exists(os.path.join(approved_dir, "renamed_note.txt"))
+    assert not os.path.exists(old_file)
+
+

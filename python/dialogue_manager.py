@@ -230,49 +230,107 @@ class DialogueManager:
     async def process(self, user_input: str, max_tokens: int = DEFAULT_CONVERSATIONAL_MAX_TOKENS) -> str:
         """Processes user input through conversational context and intent classification.
 
+        Uses streaming LLM generation (provider.stream()) to emit completed sentences
+        immediately to the frontend for ultra-low latency speech synthesis.
+
         Steps:
             1. Appends user input to the short-term conversation history.
             2. Trims history to the last `max_turns` entries.
             3. Constructs concise prompt with HeyBloopie personality and context.
-            4. Calls the LLM via provider with max_tokens limit.
-            5. Evaluates intent and parses response.
+            4. Calls provider.stream() with max_tokens limit.
+            5. In the streaming loop, buffers chunks and emits 'speak-sentence' on sentence boundaries.
             6. Appends the assistant's response to the conversation history.
             7. Trims history to the last `max_turns` entries.
             8. Returns the final response string.
-
-        Args:
-            user_input: Natural language string from the user.
-            max_tokens: Maximum tokens for conversational output (default 120, between 100-150).
-
-        Returns:
-            Assistant response string or FILE_COMMAND_TOKEN.
         """
-        # Step 2a: Add user's input to conversation history
+        from python.core import SentencePayload, emit, extract_sentences
+
+        # Step 1: Add user's input to conversation history
         self.history.append({"role": "user", "content": user_input})
         self._trim_history()
 
-        # Step 2b: Build prompt for the LLM
+        # Step 2: Build minimal prompt for the LLM
         prompt = self._build_prompt(user_input)
 
         # Get AI provider
         provider = self._get_provider()
 
         response: Optional[str] = None
+        emitted_sentences: List[str] = []
+
         if provider is not None:
-            try:
-                options = {"max_tokens": max_tokens}
-                raw_response = await provider.generate(prompt, options=options)
-                if self._is_provider_error(raw_response):
-                    logger.warning(f"AIProvider returned error message: {raw_response}")
+            options = {"max_tokens": max_tokens}
+
+            # Preferred path: Stream chunks as they arrive from the LLM
+            if hasattr(provider, "stream") and callable(getattr(provider, "stream")):
+                try:
+                    import asyncio
+                    stream_gen = provider.stream(prompt, options=options)
+                    if asyncio.iscoroutine(stream_gen):
+                        stream_gen.close()
+                        stream_gen = None
+
+                    had_provider_error = False
+                    if stream_gen is not None:
+                        buffer = ""
+                        accumulated = ""
+                        async for chunk in stream_gen:
+                            if not chunk:
+                                continue
+                            if self._is_provider_error(chunk):
+                                accumulated = ""
+                                had_provider_error = True
+                                break
+                            buffer += chunk
+                            accumulated += chunk
+
+                            # If intent is a file command token, don't emit as speech
+                            if self.FILE_COMMAND_TOKEN in buffer or buffer.strip().startswith("["):
+                                continue
+
+                            completed, buffer = extract_sentences(buffer)
+                            for sent in completed:
+                                sent_clean = sent.strip()
+                                if sent_clean and sent_clean not in emitted_sentences:
+                                    emitted_sentences.append(sent_clean)
+                                    emit("speak-sentence", SentencePayload(sent_clean))
+
+                        if accumulated.strip() and not self._is_provider_error(accumulated):
+                            parsed = self._parse_response(accumulated)
+                            if parsed != self.FILE_COMMAND_TOKEN:
+                                rem = buffer.strip()
+                                if rem and rem not in emitted_sentences:
+                                    emitted_sentences.append(rem)
+                                    emit("speak-sentence", SentencePayload(rem))
+                                response = parsed
+                            else:
+                                response = self.FILE_COMMAND_TOKEN
+                except Exception as e:
+                    logger.warning(f"Error streaming dialogue response: {e}")
                     response = None
-                else:
-                    response = self._parse_response(raw_response)
-            except Exception as e:
-                logger.error(f"Error invoking AIProvider in DialogueManager: {e}")
-                response = None
+
+            # Fallback path if provider only implements generate() and didn't fail with auth/quota error
+            if response is None and not had_provider_error:
+                try:
+                    raw_response = await provider.generate(prompt, options=options)
+                    if not self._is_provider_error(raw_response):
+                        response = self._parse_response(raw_response)
+                        if response != self.FILE_COMMAND_TOKEN and not emitted_sentences:
+                            completed, rem = extract_sentences(response)
+                            for sent in completed:
+                                sent_clean = sent.strip()
+                                if sent_clean:
+                                    emitted_sentences.append(sent_clean)
+                                    emit("speak-sentence", SentencePayload(sent_clean))
+                            if rem.strip() and rem.strip() not in emitted_sentences:
+                                emitted_sentences.append(rem.strip())
+                                emit("speak-sentence", SentencePayload(rem.strip()))
+                except Exception as e:
+                    logger.error(f"Error invoking AIProvider generate: {e}")
+                    response = None
 
         if response is None:
-            # Fallback when provider is not configured or failed
+            # Friendly fallback when provider is not configured or offline
             req_lower = user_input.lower().strip()
             conversational_starters = [
                 "who are you",
@@ -294,6 +352,8 @@ class DialogueManager:
                     "I am HeyBloopie, a professional, calm, and capable desktop executive. "
                     "I help you manage, find, and organize your files."
                 )
+                if not emitted_sentences:
+                    emit("speak-sentence", SentencePayload(response))
             else:
                 response = self.FILE_COMMAND_TOKEN
 
@@ -303,3 +363,4 @@ class DialogueManager:
 
         # Step 4: Return the response string
         return response
+
